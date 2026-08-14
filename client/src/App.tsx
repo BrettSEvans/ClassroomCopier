@@ -28,10 +28,12 @@ import {
   ColdStartOverlay,
   ErrorBoundary,
   ErrorState,
+  NarrationBanner,
+  ScanConflictNotice,
   StepIndicator,
   Button,
 } from './components/shared'
-import type { StepNumber } from './components/shared'
+import type { ScanConflictKind, StepNumber } from './components/shared'
 import { AuthFlow } from './features/auth/AuthFlow'
 import { SelectionScreen } from './features/selection/SelectionScreen'
 import { PreflightScreen } from './features/preflight/PreflightScreen'
@@ -39,6 +41,7 @@ import { ReadyToTransfer } from './features/preflight/ReadyToTransfer'
 import { TransferProgress } from './features/transfer/TransferProgress'
 import { CompletionSummary } from './features/summary/CompletionSummary'
 import {
+  ApiRequestError,
   coldStartStore,
   createTransferJob,
   getActiveJob,
@@ -85,6 +88,16 @@ function Wizard() {
     items: TransferJobItemRow[]
   } | null>(null)
   const [error, setError] = useState<unknown>(null)
+  /** Fix 1 — a real 409 whose fix is "re-scan", not the generic catch-all. */
+  const [scanConflict, setScanConflict] = useState<ScanConflictKind | null>(null)
+  /**
+   * DEFER 2 — true only when THIS mount effect is the one that discovered the
+   * in-flight job (F12 reconnect). Handed down so TransferProgress trusts
+   * `jobId` instead of repeating the same `getActiveJob()` fetch.
+   */
+  const [reconnected, setReconnected] = useState(false)
+  /** DEFER 3 — `signOut()` failed; the cookie may still be alive server-side. */
+  const [signOutFailed, setSignOutFailed] = useState(false)
 
   const cold = useColdStart()
 
@@ -97,6 +110,8 @@ function Wizard() {
     setJobId(null)
     setSummary(null)
     setError(null)
+    setScanConflict(null)
+    setReconnected(false)
   }, [])
 
   // Mount: restore the session, then rediscover any in-flight job (F12).
@@ -118,6 +133,9 @@ function Wizard() {
         const active = await getActiveJob(controller.signal)
         if (!live || !active) return
         setJobId(active)
+        // DEFER 2 — this IS the reconnect discovery; TransferProgress must not
+        // repeat it.
+        setReconnected(true)
         setStage('transfer')
       })
       .catch((error: unknown) => {
@@ -143,12 +161,22 @@ function Wizard() {
     setStage('auth')
   }
 
+  // DEFER 3 — a failed sign-out must not proceed as though it worked. The
+  // cookie the server holds may still be alive, so this is a real notice, not
+  // a fire-and-forget `.catch(() => {})` that silently lands on the sign-in
+  // screen regardless of what the server actually did.
   const handleSignOut = () => {
-    void signOut().catch(() => {})
-    clearRun()
-    setAccount(null)
-    setAuthStart('landing')
-    setStage('auth')
+    setSignOutFailed(false)
+    signOut()
+      .then(() => {
+        clearRun()
+        setAccount(null)
+        setAuthStart('landing')
+        setStage('auth')
+      })
+      .catch(() => {
+        setSignOutFailed(true)
+      })
   }
 
   const startTransfer = () => {
@@ -159,7 +187,15 @@ function Wizard() {
         setJobId(result.jobId)
         setStage('transfer')
       })
-      .catch(setError)
+      .catch((err: unknown) => {
+        // Fix 1 — `scan_stale` / `scan_already_used` are real 409s whose fix
+        // is "re-scan", not the generic catch-all (APPLY-C / APPLY-I).
+        if (err instanceof ApiRequestError && (err.code === 'scan_stale' || err.code === 'scan_already_used')) {
+          setScanConflict(err.code)
+          return
+        }
+        setError(err)
+      })
   }
 
   const handleJobComplete = (status: TransferJobStatus) => {
@@ -204,6 +240,23 @@ function Wizard() {
     )
   }
 
+  // Fix 1 — dedicated copy for `scan_stale` / `scan_already_used`, with a
+  // primary action that re-scans the SAME two courses (source/target are
+  // untouched by this catch, so Pre-flight re-mounts against them).
+  if (scanConflict) {
+    return (
+      <div className="frame">
+        <ScanConflictNotice
+          kind={scanConflict}
+          onRescan={() => {
+            setScanConflict(null)
+            setStage('preflight')
+          }}
+        />
+      </div>
+    )
+  }
+
   /* ---- The wizard ---------------------------------------------------- */
 
   return (
@@ -227,6 +280,14 @@ function Wizard() {
             </Button>
           </div>
         </div>
+      ) : null}
+
+      {/* DEFER 3 — a failed sign-out gets a notice instead of proceeding as
+          though it worked; the account header (and session) stays put. */}
+      {signOutFailed ? (
+        <NarrationBanner glyph="!">
+          Signing out did not finish. The session may still be active — try Sign out again.
+        </NarrationBanner>
       ) : null}
 
       {stage !== 'auth' ? <StepIndicator current={STEP_FOR[stage]} /> : null}
@@ -272,7 +333,12 @@ function Wizard() {
       ) : null}
 
       {stage === 'transfer' ? (
-        <TransferProgress jobId={jobId} onComplete={handleJobComplete} onStartOver={startAnother} />
+        <TransferProgress
+          jobId={jobId}
+          onComplete={handleJobComplete}
+          onStartOver={startAnother}
+          skipDiscovery={reconnected}
+        />
       ) : null}
 
       {stage === 'summary' && summary ? (

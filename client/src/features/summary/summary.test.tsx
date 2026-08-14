@@ -8,7 +8,7 @@ import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import type { TransferJobItemRow, TransferJobStatus } from '@classroom-copier/shared'
 import { attachmentFallbackNote, attachmentOverflowNote } from '@classroom-copier/shared'
-import { CompletionSummary } from './CompletionSummary'
+import { CompletionSummary, buildLogCsv, logCsvFilename } from './CompletionSummary'
 
 function status(overrides: Partial<TransferJobStatus> = {}): TransferJobStatus {
   return {
@@ -289,6 +289,62 @@ describe('the itemized log', () => {
     const { container } = renderSummary()
     expect(container.querySelector('.log-scroll')).not.toBeNull()
     expect(container.querySelector('table.log-table')).not.toBeNull()
+  })
+})
+
+describe('CSV export of the itemized log (5a)', () => {
+  const NOTE_WITH_COMMAS_AND_QUOTES: TransferJobItemRow = {
+    id: 'i6',
+    title: 'Field Trip Permission, Signed',
+    sourceType: 'courseWorkMaterial',
+    workType: null,
+    typeLabel: 'Material',
+    topicName: null,
+    outcome: 'skipped',
+    skipReason: 'user_skip_post',
+    skippedBy: 'user',
+    typeSpecific: { kind: 'none' },
+    note: 'Skipped by you — chose "Skip Material," see notes.',
+    rubricDegraded: false,
+    attemptCount: 0,
+    targetPostId: null,
+  }
+
+  const MIXED_ITEMS = [...ITEMS, NOTE_WITH_COMMAS_AND_QUOTES]
+
+  it('offers an "Export log (CSV)" action on the Completion Summary', () => {
+    renderSummary()
+    expect(screen.getByRole('button', { name: 'Export log (CSV)' })).toBeInTheDocument()
+  })
+
+  it('names the file classroom-copier-log-<jobId>.csv', () => {
+    expect(logCsvFilename('job-42')).toBe('classroom-copier-log-job-42.csv')
+  })
+
+  it('builds a CSV mirroring the on-screen six columns, for a mixed-outcome job', () => {
+    const csv = buildLogCsv(MIXED_ITEMS)
+    const lines = csv.split('\r\n')
+
+    expect(lines[0]).toBe('Title,Type,Topic,Outcome,Type-specific fields,Note')
+    expect(lines[1]).toBe('Week 1 Reading,Material,Unit 1,Transferred,,')
+    expect(lines[2]).toBe(
+      `Essay 1,Assignment,Unit 2,Fallback,Due: cleared · Max pts: 100,${attachmentFallbackNote('Unit_1_Quiz.pdf')}`,
+    )
+    expect(lines[3]).toBe('Discussion Q1,Question,(none),Transferred,Answer: Multiple choice (4 opts),')
+    expect(lines[4]).toBe('Exit Ticket,Question,Unit 2,Transferred,Answer: Short answer,')
+    expect(lines[5]).toBe(
+      'Bonus Worksheet,Material,Unit 3,Skipped,,Skipped by you — chose “Skip Material” after the attachment could not be linked.',
+    )
+  })
+
+  it('quotes and escapes a field containing commas and double quotes (RFC 4180)', () => {
+    const csv = buildLogCsv([NOTE_WITH_COMMAS_AND_QUOTES])
+    const lines = csv.split('\r\n')
+
+    expect(lines[0]).toBe('Title,Type,Topic,Outcome,Type-specific fields,Note')
+    expect(lines[1]).toBe(
+      '"Field Trip Permission, Signed",Material,(none),Skipped,,"Skipped by you — chose ""Skip Material,"" see notes."',
+    )
   })
 })
 
