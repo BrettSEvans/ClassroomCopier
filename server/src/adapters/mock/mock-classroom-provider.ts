@@ -243,10 +243,10 @@ export class MockClassroomProvider implements ClassroomProvider {
   async countPosts(courseId: string): Promise<number> {
     const [work, materials] = await Promise.all([
       this.prisma.mockCourseWork.count({
-        where: { courseId, state: { in: ['DRAFT', 'PUBLISHED', 'SCHEDULED'] } },
+        where: { courseId, state: { in: ['DRAFT', 'PUBLISHED'] } },
       }),
       this.prisma.mockCourseWorkMaterial.count({
-        where: { courseId, state: { in: ['DRAFT', 'PUBLISHED', 'SCHEDULED'] } },
+        where: { courseId, state: { in: ['DRAFT', 'PUBLISHED'] } },
       }),
     ])
     return work + materials
@@ -306,6 +306,7 @@ export class MockClassroomProvider implements ClassroomProvider {
       description: r.description,
       workType: r.workType as WorkType,
       state: r.state as CourseWorkState,
+      scheduledTime: r.scheduledTime,
       maxPoints: r.maxPoints,
       answerConfig: parseAnswerConfig(r.answerConfig),
       quizFormLink: r.quizFormLink,

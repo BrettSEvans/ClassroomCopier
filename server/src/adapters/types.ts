@@ -127,6 +127,9 @@ export interface ProviderCourseWork {
   description: string | null
   workType: WorkType
   state: CourseWorkState
+  /** Non-null exactly when this DRAFT is scheduled for future publication —
+   *  Google's representation of "scheduled", there being no such state. */
+  scheduledTime: Date | null
   maxPoints: number | null
   answerConfig: AnswerConfig | null
   quizFormLink: string | null
@@ -208,13 +211,11 @@ export interface ListCourseWorkRequest extends PageRequest {
    * mock test would still pass, because the mock reads from SQLite and would
    * happily return everything. The mock is therefore held to the real default.
    *
-   * DECLARED DIVERGENCE (APPLY-D): `SCHEDULED` is a mock-invented member of this
-   * vocabulary. Google's `courseWorkStates` enum is understood to be
-   * `PUBLISHED | DRAFT | DELETED`, with a scheduled post being a DRAFT carrying
-   * `scheduledTime` — which `MockCourseWork` also models, so the same fact is
-   * stored twice. It is listed in `05-implementation.md` §7 and on the backlog
-   * beside `QUIZ_ASSIGNMENT`, and the contract test names it as a divergence
-   * rather than asserting it as fidelity.
+   * APPLY-D, resolved: `SCHEDULED` was a mock-invented member of this
+   * vocabulary and has been removed. Google's enum is `PUBLISHED | DRAFT`
+   * (plus `DELETED`, deliberately unmodelled in v1 — no fixture exercises it).
+   * A scheduled post is a DRAFT carrying `scheduledTime`, stored once, and the
+   * contract test asserts that representation as fidelity.
    */
   courseWorkStates?: CourseWorkState[]
 }

@@ -25,7 +25,7 @@ import type {
   WorkType,
 } from '../adapters/types.js'
 
-export const ALL_COURSE_WORK_STATES: CourseWorkState[] = ['DRAFT', 'PUBLISHED', 'SCHEDULED']
+export const ALL_COURSE_WORK_STATES: CourseWorkState[] = ['DRAFT', 'PUBLISHED']
 
 /**
  * APPLY-D — the second surface's states are passed under their OWN parameter
@@ -33,11 +33,7 @@ export const ALL_COURSE_WORK_STATES: CourseWorkState[] = ['DRAFT', 'PUBLISHED', 
  * is a different real endpoint. The member list happens to coincide today; the
  * constant is separate so it can diverge without a rename.
  */
-export const ALL_COURSE_WORK_MATERIAL_STATES: CourseWorkState[] = [
-  'DRAFT',
-  'PUBLISHED',
-  'SCHEDULED',
-]
+export const ALL_COURSE_WORK_MATERIAL_STATES: CourseWorkState[] = ['DRAFT', 'PUBLISHED']
 
 export interface EnumeratedPost {
   sourceType: SourceType
@@ -47,6 +43,8 @@ export interface EnumeratedPost {
   /** null for Materials — a Material has no workType, not a defaulted one. */
   workType: WorkType | null
   state: CourseWorkState
+  /** Carried from the provider row: a scheduled post is DRAFT + scheduledTime. */
+  scheduledTime: Date | null
   maxPoints: number | null
   answerConfig: AnswerConfig | null
   quizFormLink: string | null
@@ -146,6 +144,7 @@ export async function enumeratePosts(
       description: w.description,
       workType: w.workType,
       state: w.state,
+      scheduledTime: w.scheduledTime,
       maxPoints: w.maxPoints,
       answerConfig: w.answerConfig,
       quizFormLink: w.quizFormLink,
@@ -162,6 +161,7 @@ export async function enumeratePosts(
       // Structurally absent on a Material — not a nulled-out shared field.
       workType: null,
       state: m.state,
+      scheduledTime: null,
       maxPoints: null,
       answerConfig: null,
       quizFormLink: null,

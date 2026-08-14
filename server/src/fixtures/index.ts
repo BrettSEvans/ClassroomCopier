@@ -57,7 +57,7 @@ export interface SeedCourseWork {
   title: string
   description?: string | null
   workType: 'ASSIGNMENT' | 'QUIZ_ASSIGNMENT' | 'SHORT_ANSWER_QUESTION' | 'MULTIPLE_CHOICE_QUESTION'
-  state: 'DRAFT' | 'PUBLISHED' | 'SCHEDULED'
+  state: 'DRAFT' | 'PUBLISHED'
   dueDate?: string | null
   scheduledTime?: string | null
   maxPoints?: number | null
@@ -74,7 +74,7 @@ export interface SeedCourseWorkMaterial {
   id: string
   title: string
   description?: string | null
-  state: 'DRAFT' | 'PUBLISHED' | 'SCHEDULED'
+  state: 'DRAFT' | 'PUBLISHED'
   topicId?: string | null
   creationTime: string
   createdOrder: number
@@ -209,7 +209,9 @@ const f1: SeedCourse = {
       title: 'Quiz: Chapter 2',
       description: 'Ten questions on westward expansion.',
       workType: 'QUIZ_ASSIGNMENT',
-      state: 'SCHEDULED',
+      // Scheduled — which in Google's vocabulary is a DRAFT carrying
+      // scheduledTime, not a state of its own (APPLY-D, resolved).
+      state: 'DRAFT',
       scheduledTime: T('2025-09-20T15:00:00.000Z'),
       dueDate: T('2025-09-21T23:59:00.000Z'),
       maxPoints: 50,

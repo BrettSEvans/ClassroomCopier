@@ -75,25 +75,22 @@ describe('F1 — healthy, and the carrier for F8 / F9 / F11', () => {
     expect(unhealthy).toBe(0)
   })
 
-  it('F8 — covers Draft, Published and Scheduled source states', async () => {
-    const states = new Set(
-      (
-        await db.prisma.mockCourseWork.findMany({
-          where: { courseId: FIXTURE_KEYS.F8 },
-          select: { state: true },
-        })
-      ).map((r) => r.state),
-    )
-    const materialStates = new Set(
-      (
-        await db.prisma.mockCourseWorkMaterial.findMany({
-          where: { courseId: FIXTURE_KEYS.F8 },
-          select: { state: true },
-        })
-      ).map((r) => r.state),
-    )
-    const all = new Set([...states, ...materialStates])
-    expect(all).toEqual(new Set(['DRAFT', 'PUBLISHED', 'SCHEDULED']))
+  it('F8 — covers Published, plain Draft, and scheduled Draft (Google has no SCHEDULED state)', async () => {
+    const work = await db.prisma.mockCourseWork.findMany({
+      where: { courseId: FIXTURE_KEYS.F8 },
+      select: { state: true, scheduledTime: true },
+    })
+    const materials = await db.prisma.mockCourseWorkMaterial.findMany({
+      where: { courseId: FIXTURE_KEYS.F8 },
+      select: { state: true },
+    })
+    const states = new Set([...work.map((r) => r.state), ...materials.map((r) => r.state)])
+    // The vocabulary is Google's: two states, no invented third.
+    expect(states).toEqual(new Set(['DRAFT', 'PUBLISHED']))
+    // The third COVERAGE case still exists — a scheduled post, represented the
+    // way the real API represents it: DRAFT + scheduledTime.
+    expect(work.some((r) => r.state === 'DRAFT' && r.scheduledTime != null)).toBe(true)
+    expect(work.some((r) => r.state === 'DRAFT' && r.scheduledTime == null)).toBe(true)
   })
 
   it('F9 — covers all four coursework types including both Question configs', async () => {

@@ -31,7 +31,12 @@ export type WorkType = z.infer<typeof WorkTypeSchema>
 export const CourseStateSchema = z.enum(['ACTIVE', 'ARCHIVED'])
 export type CourseState = z.infer<typeof CourseStateSchema>
 
-export const CourseWorkStateSchema = z.enum(['DRAFT', 'PUBLISHED', 'SCHEDULED'])
+// Google's real courseWorkStates vocabulary. A scheduled post is NOT its own
+// state — it is a DRAFT carrying `scheduledTime` (APPLY-D, resolved). Google
+// also defines DELETED, which v1 deliberately does not model: nothing requests
+// deleted posts and no fixture exercises them, and an enum member with nothing
+// underneath it is this project's recurring defect class.
+export const CourseWorkStateSchema = z.enum(['DRAFT', 'PUBLISHED'])
 export type CourseWorkState = z.infer<typeof CourseWorkStateSchema>
 
 export const ShareModeSchema = z.enum(['VIEW', 'EDIT', 'STUDENT_COPY'])

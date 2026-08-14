@@ -69,27 +69,28 @@ describe('listCourseWork — courseWorkStates (D19/D, the most dangerous adapter
   })
 
   /**
-   * APPLY-D. This block used to read `expect(states.has('SCHEDULED')).toBe(true)`
-   * inside the fidelity test above, which PINNED a mock-invented value in place
-   * as though it were real-API parity. `QUIZ_ASSIGNMENT` was correctly
-   * identified as mock-only and flagged; `SCHEDULED` is the same kind of thing
-   * and was not. Naming it here keeps the fixture behaviour under test while
-   * making the divergence impossible to mistake for fidelity.
+   * APPLY-D, resolved. `SCHEDULED` was a mock-invented state pinned in place by
+   * the test that used to live here, flagged as a DECLARED DIVERGENCE. Google's
+   * real vocabulary is PUBLISHED | DRAFT (| DELETED, which v1 deliberately does
+   * not model — nothing requests it and no fixture exercises it). A scheduled
+   * post is a DRAFT carrying `scheduledTime`, and that is now the only
+   * representation: one fact, one column.
    */
-  it('DECLARED DIVERGENCE — SCHEDULED is mock-invented (see 05-implementation.md §7)', async () => {
+  it('real-API parity — a scheduled post is a DRAFT carrying scheduledTime, never its own state', async () => {
     const page = await provider.listCourseWork(FIXTURE_KEYS.F1, {
       courseWorkStates: ALL_COURSE_WORK_STATES,
     })
-    const scheduled = page.items.filter((i) => i.state === 'SCHEDULED')
-    expect(scheduled.length).toBeGreaterThan(0)
-    // Google models a scheduled post as a DRAFT carrying `scheduledTime` — which
-    // MockCourseWork ALSO stores, so the same fact lives in two columns. The
-    // real-adapter mapping is on the backlog.
-    for (const post of scheduled) {
-      const row = await db.prisma.mockCourseWork.findUniqueOrThrow({ where: { id: post.id } })
-      expect(row.scheduledTime, 'a SCHEDULED post with no scheduledTime is not modelling anything')
-        .not.toBeNull()
-    }
+    // The invented state must be gone entirely.
+    expect(page.items.some((i) => (i.state as string) === 'SCHEDULED')).toBe(false)
+    // F8's scheduled post is still present and still distinguishable — as a
+    // DRAFT with a scheduledTime, exactly as courses.courseWork models it.
+    const scheduledDrafts = page.items.filter((i) => i.state === 'DRAFT' && i.scheduledTime != null)
+    expect(scheduledDrafts.length).toBeGreaterThan(0)
+    // And it surfaces under a DRAFT-only filter, as it would from the real API.
+    const draftsOnly = await provider.listCourseWork(FIXTURE_KEYS.F1, {
+      courseWorkStates: ['DRAFT'],
+    })
+    expect(draftsOnly.items.some((i) => i.scheduledTime != null)).toBe(true)
   })
 
   it('APPLY-D — the two surfaces take DIFFERENTLY NAMED state parameters', async () => {

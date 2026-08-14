@@ -30,7 +30,7 @@ describe('post-enumerator (D16) — the single owner of "all posts"', () => {
     expect(result.listCalls).toBe(spy.mock.calls.length + materialSpy.mock.calls.length)
   })
 
-  it('passes ALL THREE courseWorkStates explicitly — F8 posts are not dropped', async () => {
+  it('passes BOTH courseWorkStates explicitly — F8 posts (incl. scheduled Drafts) are not dropped', async () => {
     const provider = new MockClassroomProvider(db.prisma)
     const spy = vi.spyOn(provider, 'listCourseWork')
     await enumeratePosts(provider, FIXTURE_KEYS.F1)
@@ -41,7 +41,8 @@ describe('post-enumerator (D16) — the single owner of "all posts"', () => {
   it('would UNDER-scan if the states filter were omitted — proving the filter is load-bearing', async () => {
     const provider = new MockClassroomProvider(db.prisma)
     // The mock is held to the real API's default (PUBLISHED only). A caller
-    // that forgets courseWorkStates silently loses Draft and Scheduled posts.
+    // that forgets courseWorkStates silently loses every Draft — including
+    // scheduled posts, which are Drafts carrying scheduledTime.
     const unfiltered = await provider.listCourseWork(FIXTURE_KEYS.F1)
     const filtered = await provider.listCourseWork(FIXTURE_KEYS.F1, {
       courseWorkStates: ALL_COURSE_WORK_STATES,
