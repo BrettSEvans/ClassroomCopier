@@ -457,7 +457,10 @@ describe('POST /transfer-jobs/:id/cancel — the partial-completion contract at 
       engineOptions: FAST_ENGINE,
       monetization,
     }).app
-    const agent = request.agent(slow)
+    // Merge note: this test builds its own app instance, so it must carry the
+    // CSRF header the way the shared agent at the top of this file does — it
+    // was authored in a worktree that predated the header requirement.
+    const agent = request.agent(slow).set('X-Classroom-Copier', '1')
     await agent.post('/api/auth/sign-in').send({ accountId: 'acct-jamie' }).expect(200)
     const scan = await preflight(agent, FIXTURE_KEYS.F1, FIXTURE_KEYS.TARGET_JAMIE)
     const created = await agent
