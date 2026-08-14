@@ -2,7 +2,7 @@
   "name": "classroom-copier",
   "private": true,
   "version": "1.0.0",
-  "description": "Classroom Copier \u2014 batch-copy classwork into an existing Google Classroom course (mock-backed v1)",
+  "description": "Classroom Copier — batch-copy classwork into an existing Google Classroom course (mock-backed v1)",
   "workspaces": [
     "shared",
     "server",
@@ -28,11 +28,14 @@
     "test:budget:a11y": "npm run -w client test:budget:a11y",
     "test:budget:coldstart": "npm run -w client test:budget:coldstart",
     "check:citations": "node scripts/check-doc-citations.mjs",
+    "test:e2e": "playwright test --config=e2e/playwright.config.ts",
     "test:budget:lease": "npm run -w server test:budget:lease",
     "test:budget:courses": "npm run -w server test:budget:courses"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.13.0",
     "@eslint/js": "^9.39.0",
+    "@playwright/test": "^1.62.1",
     "eslint": "^9.39.0",
     "globals": "^15.15.0",
     "typescript": "^5.9.3",
