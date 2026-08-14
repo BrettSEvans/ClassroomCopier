@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   attachmentFallbackNote,
+  cancelledByUserNote,
+  isUserSkip,
   rateLimitExhaustionNote,
   type Resolution,
 } from '@classroom-copier/shared'
@@ -12,7 +14,13 @@ import { FAST_ENGINE, runTransfer, scanAndCreateJob } from '../../test/helpers/t
 import { MAX_ATTEMPTS } from './backoff.js'
 import { checkInvariant, countOutcomes } from './reconciliation.js'
 import { PreflightEngine } from './preflight-engine.js'
-import { TransferEngine, createTransferJob } from './transfer-engine.js'
+import {
+  JobAlreadyFinishedError,
+  JobNotFoundError,
+  TransferEngine,
+  createTransferJob,
+  requestJobCancellation,
+} from './transfer-engine.js'
 
 let db: TestDb
 beforeEach(async () => {
@@ -595,5 +603,153 @@ describe('D28 — the monetization completion hook is actually called', () => {
     })
     await new TransferEngine(db.prisma, provider, { ...FAST_ENGINE, onJobComplete }).run(jobId)
     expect(onJobComplete.mock.calls[0]![0]).toMatchObject({ cleanTransfer: false })
+  })
+})
+
+/* ================================================================= *
+ * Cancel — the mid-transfer flag the executor reads BETWEEN items
+ * ================================================================= */
+
+describe('cancel — the partial-completion contract', () => {
+  it('the in-flight item completes naturally; every remaining pending item drains skippedByUser; the job lands completed+cancelledAt; reconciliation balances', async () => {
+    // F1 has 6 posts, so there is a real "remaining" set behind the one
+    // in-flight item. perItemDelayMs (a run-scoped provider option, D25) opens
+    // a real window during which the create is in flight.
+    const provider = new MockClassroomProvider(db.prisma, { perItemDelayMs: 150 })
+    const scan = await new PreflightEngine(db.prisma, provider).run({
+      accountId: 'acct-jamie',
+      sourceCourseId: FIXTURE_KEYS.F1,
+      targetCourseId: FIXTURE_KEYS.TARGET_JAMIE,
+    })
+    const { jobId } = await createTransferJob(db.prisma, {
+      accountId: 'acct-jamie',
+      scanId: scan.scanId,
+      resolutions: [],
+    })
+    const engine = new TransferEngine(db.prisma, provider, FAST_ENGINE)
+    const runPromise = engine.run(jobId)
+
+    // Wait until the FIRST item is genuinely in flight. attemptedAt is written
+    // immediately before the provider call (D14), so this is the earliest
+    // honest signal that we are inside its delay window — not a blind sleep
+    // racing the engine.
+    let inFlight: { id: string } | null = null
+    for (let i = 0; i < 200 && !inFlight; i += 1) {
+      inFlight = await db.prisma.transferJobItem.findFirst({
+        where: { jobId, attemptedAt: { not: null } },
+        select: { id: true },
+      })
+      if (!inFlight) await new Promise((resolve) => setTimeout(resolve, 5))
+    }
+    expect(inFlight, 'the first item never started').not.toBeNull()
+
+    await requestJobCancellation(db.prisma, { jobId, accountId: 'acct-jamie' })
+    await runPromise
+
+    const job = await db.prisma.transferJob.findUniqueOrThrow({ where: { id: jobId } })
+    expect(job.status).toBe('completed')
+    expect(job.cancelRequested).toBe(true)
+    expect(job.cancelledAt).not.toBeNull()
+    expect(job.activeAccountId).toBeNull()
+
+    const items = await db.prisma.transferJobItem.findMany({
+      where: { jobId },
+      orderBy: { createdOrder: 'asc' },
+    })
+    expect(items.length).toBe(6)
+
+    // The in-flight item was never asked to un-happen: it completed and
+    // resolved to a REAL outcome, never a cancel-drain skip.
+    const inFlightItem = items.find((i) => i.id === inFlight!.id)!
+    expect(inFlightItem.outcome).toBe('transferred')
+    expect(inFlightItem.skipReason).toBeNull()
+
+    // Every OTHER item never dispatched: drained honestly, attributed to the
+    // teacher's own choice, carrying the centralized cancel note.
+    const drained = items.filter((i) => i.id !== inFlightItem.id)
+    expect(drained.length).toBeGreaterThan(0)
+    for (const item of drained) {
+      expect(item.outcome, `"${item.title}" should have been drained`).toBe('skipped')
+      expect(item.skipReason).toBe('cancelled_by_user')
+      expect(isUserSkip(item.skipReason as never)).toBe(true)
+      expect(item.note).toBe(cancelledByUserNote())
+      expect(item.targetPostId).toBeNull()
+      expect(item.attemptedAt, `"${item.title}" should never have been attempted`).toBeNull()
+    }
+
+    // The sacred invariant still holds across the drained + naturally-completed mix.
+    const result = await checkInvariant(db.prisma, jobId)
+    expect(result.holds, result.detail).toBe(true)
+    const counts = await countOutcomes(db.prisma, jobId)
+    expect(counts.skippedByUser).toBe(drained.length)
+  })
+
+  it('cancel on a finished job is refused (409-shaped)', async () => {
+    const { jobId } = await runTransfer(db.prisma, {
+      accountId: 'acct-jamie',
+      sourceCourseId: FIXTURE_KEYS.F1,
+      targetCourseId: FIXTURE_KEYS.TARGET_JAMIE,
+    })
+    await expect(
+      requestJobCancellation(db.prisma, { jobId, accountId: 'acct-jamie' }),
+    ).rejects.toBeInstanceOf(JobAlreadyFinishedError)
+  })
+
+  it('double-cancel on a running job is idempotent — both calls succeed', async () => {
+    const provider = new MockClassroomProvider(db.prisma, { perItemDelayMs: 150 })
+    const scan = await new PreflightEngine(db.prisma, provider).run({
+      accountId: 'acct-jamie',
+      sourceCourseId: FIXTURE_KEYS.F1,
+      targetCourseId: FIXTURE_KEYS.TARGET_JAMIE,
+    })
+    const { jobId } = await createTransferJob(db.prisma, {
+      accountId: 'acct-jamie',
+      scanId: scan.scanId,
+      resolutions: [],
+    })
+    const engine = new TransferEngine(db.prisma, provider, FAST_ENGINE)
+    const runPromise = engine.run(jobId)
+
+    // The engine checks cancelRequested BETWEEN items — including once before
+    // item 0 even dispatches. Firing cancel blind at job start can race THAT
+    // check (topic-map-build and enumeration are near-instant reads), so wait
+    // for genuine evidence the first item is in flight, the same signal test
+    // 1 uses, before proving idempotency.
+    let inFlight: { id: string } | null = null
+    for (let i = 0; i < 200 && !inFlight; i += 1) {
+      inFlight = await db.prisma.transferJobItem.findFirst({
+        where: { jobId, attemptedAt: { not: null } },
+        select: { id: true },
+      })
+      if (!inFlight) await new Promise((resolve) => setTimeout(resolve, 5))
+    }
+    expect(inFlight, 'the first item never started').not.toBeNull()
+
+    // Both calls fire back-to-back (concurrently, not sequentially with a DB
+    // round-trip gap between them) — the point of this case is idempotency,
+    // not a race against the job's own drain.
+    const [first, second] = await Promise.all([
+      requestJobCancellation(db.prisma, { jobId, accountId: 'acct-jamie' }),
+      requestJobCancellation(db.prisma, { jobId, accountId: 'acct-jamie' }),
+    ])
+    expect(first).toEqual({ jobId })
+    expect(second).toEqual({ jobId })
+
+    const job = await db.prisma.transferJob.findUniqueOrThrow({ where: { id: jobId } })
+    expect(job.cancelRequested).toBe(true)
+    expect(job.cancelRequestedAt).not.toBeNull()
+
+    await runPromise
+  })
+
+  it('a cancel for a job that does not belong to this account is not found', async () => {
+    const { jobId } = await scanAndCreateJob(db.prisma, {
+      accountId: 'acct-jamie',
+      sourceCourseId: FIXTURE_KEYS.F1,
+      targetCourseId: FIXTURE_KEYS.TARGET_JAMIE,
+    })
+    await expect(
+      requestJobCancellation(db.prisma, { jobId, accountId: 'acct-dana' }),
+    ).rejects.toBeInstanceOf(JobNotFoundError)
   })
 })

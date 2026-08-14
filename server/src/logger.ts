@@ -61,7 +61,9 @@ export const logger = {
       | 'interrupted'
       | 'failed'
       | 'swept_pending'
-      | 'reconciled',
+      | 'reconciled'
+      | 'cancel_requested'
+      | 'cancelled',
     fields: Record<string, unknown>,
   ) => write(event === 'failed' || event === 'swept_pending' ? 'WARN' : 'INFO', `job.${event}`, fields),
 }

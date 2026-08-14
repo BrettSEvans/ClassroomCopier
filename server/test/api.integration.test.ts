@@ -406,6 +406,137 @@ describe('transfer jobs', () => {
   })
 })
 
+describe('POST /transfer-jobs/:id/cancel — the partial-completion contract at the HTTP boundary', () => {
+  it('cancels a running job: 200, drains the rest, and the job completes with cancelledAt set', async () => {
+    const agent = await signedIn()
+    const scan = await preflight(agent, FIXTURE_KEYS.F1, FIXTURE_KEYS.TARGET_JAMIE)
+    const created = await agent
+      .post('/api/transfer-jobs')
+      .send({ scanId: scan.scanId, resolutions: [] })
+      .expect(202)
+
+    const cancel = await agent
+      .post(`/api/transfer-jobs/${created.body.jobId}/cancel`)
+      .expect(200)
+    expect(cancel.body).toEqual({ jobId: created.body.jobId, cancelRequested: true })
+
+    const final = await waitForTerminal(agent, created.body.jobId as string)
+    expect(final.status).toBe('completed')
+    expect(final.cancelRequested).toBe(true)
+    expect(final.cancelledAt).not.toBeNull()
+    expect(
+      (final.transferred as number) + (final.fallbackShell as number) + (final.skippedTotal as number),
+    ).toBe(final.totalItems)
+  })
+
+  it('cancelling an already-finished job is refused with 409 job_already_finished', async () => {
+    const agent = await signedIn()
+    const scan = await preflight(agent, FIXTURE_KEYS.F1, FIXTURE_KEYS.TARGET_JAMIE)
+    const created = await agent
+      .post('/api/transfer-jobs')
+      .send({ scanId: scan.scanId, resolutions: [] })
+      .expect(202)
+    await waitForTerminal(agent, created.body.jobId as string)
+
+    const res = await agent
+      .post(`/api/transfer-jobs/${created.body.jobId}/cancel`)
+      .expect(409)
+    expect(res.body.error.code).toBe('job_already_finished')
+  })
+
+  it('double-cancelling a running job returns 200 both times', async () => {
+    // A run-scoped provider delay (D25) keeps the 6-item F1 job genuinely
+    // "running" for both cancel calls rather than racing its own completion,
+    // even on a loaded machine.
+    const slow = buildApp({
+      prisma: db.prisma,
+      providerOptions: { perItemDelayMs: 150 },
+      engineOptions: FAST_ENGINE,
+      monetization,
+    }).app
+    const agent = request.agent(slow)
+    await agent.post('/api/auth/sign-in').send({ accountId: 'acct-jamie' }).expect(200)
+    const scan = await preflight(agent, FIXTURE_KEYS.F1, FIXTURE_KEYS.TARGET_JAMIE)
+    const created = await agent
+      .post('/api/transfer-jobs')
+      .send({ scanId: scan.scanId, resolutions: [] })
+      .expect(202)
+
+    // The engine checks cancelRequested BETWEEN items, including once before
+    // item 0 dispatches — wait for genuine evidence the first item is in
+    // flight before racing two cancels against it, the same signal the
+    // engine-level test uses.
+    let inFlight: unknown = null
+    for (let i = 0; i < 200 && !inFlight; i += 1) {
+      inFlight = await db.prisma.transferJobItem.findFirst({
+        where: { jobId: created.body.jobId as string, attemptedAt: { not: null } },
+        select: { id: true },
+      })
+      if (!inFlight) await new Promise((resolve) => setTimeout(resolve, 5))
+    }
+    expect(inFlight, 'the first item never started').not.toBeNull()
+
+    await Promise.all([
+      agent.post(`/api/transfer-jobs/${created.body.jobId}/cancel`).expect(200),
+      agent.post(`/api/transfer-jobs/${created.body.jobId}/cancel`).expect(200),
+    ])
+
+    await waitForTerminal(agent, created.body.jobId as string)
+  })
+
+  it('404s a cancel for another account’s job', async () => {
+    const jamie = await signedIn('acct-jamie')
+    const scan = await preflight(jamie, FIXTURE_KEYS.F1, FIXTURE_KEYS.TARGET_JAMIE)
+    const created = await jamie
+      .post('/api/transfer-jobs')
+      .send({ scanId: scan.scanId, resolutions: [] })
+      .expect(202)
+    const dana = await signedIn('acct-dana')
+    await dana.post(`/api/transfer-jobs/${created.body.jobId}/cancel`).expect(404)
+    await waitForTerminal(jamie, created.body.jobId as string)
+  })
+
+  it('releases the single-active-job guard: /active answers 204 and a new job can start (D5/D12 unchanged)', async () => {
+    const agent = await signedIn()
+    const scan = await preflight(agent, FIXTURE_KEYS.F1, FIXTURE_KEYS.TARGET_JAMIE)
+    const created = await agent
+      .post('/api/transfer-jobs')
+      .send({ scanId: scan.scanId, resolutions: [] })
+      .expect(202)
+    await agent.post(`/api/transfer-jobs/${created.body.jobId}/cancel`).expect(200)
+    await waitForTerminal(agent, created.body.jobId as string)
+
+    await agent.get('/api/transfer-jobs/active').expect(204)
+
+    const secondScan = await preflight(agent, FIXTURE_KEYS.F2, FIXTURE_KEYS.TARGET_JAMIE)
+    const second = await agent
+      .post('/api/transfer-jobs')
+      .send({ scanId: secondScan.scanId, resolutions: [] })
+      .expect(202)
+    await waitForTerminal(agent, second.body.jobId as string)
+  })
+
+  it('the reconciler finds nothing to do around a cancelled-and-completed job', async () => {
+    const agent = await signedIn()
+    const scan = await preflight(agent, FIXTURE_KEYS.F1, FIXTURE_KEYS.TARGET_JAMIE)
+    const created = await agent
+      .post('/api/transfer-jobs')
+      .send({ scanId: scan.scanId, resolutions: [] })
+      .expect(202)
+    await agent.post(`/api/transfer-jobs/${created.body.jobId}/cancel`).expect(200)
+    await waitForTerminal(agent, created.body.jobId as string)
+
+    const built = buildApp({ prisma: db.prisma, engineOptions: FAST_ENGINE, monetization })
+    const result = await built.reconciler.reconcileStaleJobs(new Date(Date.now() + 60 * 60_000))
+    expect(result.jobsReconciled).toBe(0)
+
+    const job = await db.prisma.transferJob.findUniqueOrThrow({
+      where: { id: created.body.jobId as string },
+    })
+    expect(job.status).toBe('completed')
+  })
+})
+
 describe('monetization is present, called, and inert (flag off)', () => {
   it('calls the credit-check hook at job creation and the completion hook at the end, changing no balance', async () => {
     const agent = await signedIn()

@@ -21,10 +21,13 @@ import { typeLabel } from '../services/post-enumerator.js'
 import { countOutcomes } from '../services/reconciliation.js'
 import {
   ActiveJobConflictError,
+  JobAlreadyFinishedError,
+  JobNotFoundError,
   ScanAlreadyUsedError,
   ScanNotFoundError,
   ScanStaleError,
   createTransferJob,
+  requestJobCancellation,
   type TransferEngine,
 } from '../services/transfer-engine.js'
 import { logger } from '../logger.js'
@@ -205,10 +208,45 @@ export function transferJobsRouter(
       rateLimitPause: job.rateLimitPause
         ? (JSON.parse(job.rateLimitPause) as TransferJobStatus['rateLimitPause'])
         : null,
+      cancelRequested: job.cancelRequested,
+      cancelledAt: job.cancelledAt?.toISOString() ?? null,
       startedAt: job.startedAt?.toISOString() ?? null,
       finishedAt: job.finishedAt?.toISOString() ?? null,
     }
     res.json(payload)
+  })
+
+  /**
+   * POST /transfer-jobs/:id/cancel — the mid-transfer Cancel control.
+   *
+   * Sets the flag; never writes to `TransferJobItem` rows itself (the
+   * executor is the only writer of those while it holds the lease). Idempotent
+   * while the job is non-terminal (200 every time); refused with 409 once the
+   * job has already finished — there is nothing left to drain.
+   */
+  router.post('/transfer-jobs/:id/cancel', auth, async (req, res, next) => {
+    try {
+      const { jobId } = await requestJobCancellation(prisma, {
+        jobId: param(req.params.id),
+        accountId: req.auth!.accountId,
+      })
+      res.status(200).json({ jobId, cancelRequested: true })
+    } catch (error) {
+      if (error instanceof JobAlreadyFinishedError) {
+        res.status(409).json({
+          error: {
+            code: 'job_already_finished',
+            message: 'This transfer has already finished; there is nothing left to cancel.',
+          },
+        })
+        return
+      }
+      if (error instanceof JobNotFoundError) {
+        res.status(404).json({ error: { code: 'not_found', message: 'No such transfer job.' } })
+        return
+      }
+      next(error)
+    }
   })
 
   /** Fetched ONCE at completion — the aria-live throttling requirement is

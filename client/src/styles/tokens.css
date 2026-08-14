@@ -272,6 +272,11 @@ select.select-input:focus-visible{ outline:3px solid var(--focus); outline-offse
   display:flex; gap:10px; align-items:center; padding:12px 14px; background:var(--amber-100);
   border:1px solid var(--amber-700); border-radius:var(--radius); font-size:13.5px; color:var(--amber-700); margin-top:14px;
 }
+.cancel-row{ margin-top:18px; }
+.cancel-confirm-body{ display:block; }
+.cancel-confirm-question{ margin:0 0 6px; font-weight:600; color:var(--ink-900); }
+.cancel-confirm-detail{ margin:0 0 12px; color:var(--amber-700); }
+.cancel-confirm-actions{ display:flex; gap:10px; }
 
 /* ---- Completion summary ---- */
 .stat-grid{ display:grid; grid-template-columns:repeat(5,1fr); gap:10px; margin-bottom:18px; }

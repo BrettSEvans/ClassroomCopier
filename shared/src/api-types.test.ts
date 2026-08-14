@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  CancelTransferJobResponseSchema,
   NON_TERMINAL_JOB_STATUSES,
   ResolutionSchema,
   SYSTEM_SKIP_REASONS,
@@ -10,7 +11,12 @@ import {
   isTerminalJobStatus,
   isUserSkip,
 } from './api-types.js'
-import { attachmentFallbackNote, rateLimitExhaustionNote, rubricDegradedNote } from './notes.js'
+import {
+  attachmentFallbackNote,
+  cancelledByUserNote,
+  rateLimitExhaustionNote,
+  rubricDegradedNote,
+} from './notes.js'
 
 describe('Resolution (D15) — the discriminated union', () => {
   it('accepts each of the five Action-Sheet options', () => {
@@ -54,7 +60,8 @@ describe('skip reasons (D14) — user vs system', () => {
   it('classifies every reason as exactly one of user or system', () => {
     const all = [...USER_SKIP_REASONS, ...SYSTEM_SKIP_REASONS]
     expect(new Set(all).size).toBe(all.length)
-    expect(all).toHaveLength(5)
+    // 3 user (user_skip_post, user_skip_attachment, cancelled_by_user) + 3 system.
+    expect(all).toHaveLength(6)
   })
 
   it('never counts server_interrupted as a skip the teacher chose', () => {
@@ -62,6 +69,29 @@ describe('skip reasons (D14) — user vs system', () => {
     expect(isUserSkip('provider_error')).toBe(false)
     expect(isUserSkip('rate_limit_exhausted')).toBe(false)
     expect(isUserSkip('user_skip_post')).toBe(true)
+  })
+
+  it('counts a teacher-cancelled drain as the teacher\'s own choice (D14 for cancel)', () => {
+    // The teacher clicked Cancel — "Skipped by you" is honest attribution for
+    // every item the cancellation drained, not just the Action-Sheet skips.
+    expect(isUserSkip('cancelled_by_user')).toBe(true)
+    expect(USER_SKIP_REASONS).toContain('cancelled_by_user')
+  })
+})
+
+describe('cancel — the flag contract', () => {
+  it('TransferJobStatus carries cancelRequested and cancelledAt', () => {
+    const shape = TransferJobStatusSchema.shape
+    expect(shape.cancelRequested).toBeDefined()
+    expect(shape.cancelledAt).toBeDefined()
+  })
+
+  it('CancelTransferJobResponseSchema accepts the idempotent 200 body', () => {
+    const parsed = CancelTransferJobResponseSchema.safeParse({
+      jobId: 'job-1',
+      cancelRequested: true,
+    })
+    expect(parsed.success).toBe(true)
   })
 })
 
@@ -107,5 +137,12 @@ describe('notes (D6, Δ2)', () => {
   it('keeps the rubric note distinct from both fallback notes', () => {
     expect(rubricDegradedNote()).not.toBe(attachmentFallbackNote('x'))
     expect(rubricDegradedNote()).not.toBe(rateLimitExhaustionNote(5))
+  })
+
+  it('the cancel note is honest, plainspoken, and distinct from every other note', () => {
+    expect(cancelledByUserNote()).toBe('Cancelled by you before this post was attempted.')
+    expect(cancelledByUserNote()).not.toBe(attachmentFallbackNote('x'))
+    expect(cancelledByUserNote()).not.toBe(rateLimitExhaustionNote(5))
+    expect(cancelledByUserNote()).not.toBe(rubricDegradedNote())
   })
 })

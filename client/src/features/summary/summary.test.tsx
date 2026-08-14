@@ -29,6 +29,8 @@ function status(overrides: Partial<TransferJobStatus> = {}): TransferJobStatus {
     rubricNotesAdded: 1,
     currentItem: null,
     rateLimitPause: null,
+    cancelRequested: false,
+    cancelledAt: null,
     startedAt: '2026-08-14T18:00:00.000Z',
     finishedAt: '2026-08-14T18:02:00.000Z',
     ...overrides,
@@ -159,6 +161,37 @@ describe('Completion Summary', () => {
     expect(within(tile('Fallback shells')).getByText('2')).toBeInTheDocument()
     expect(within(tile('Skipped by you')).getByText('1')).toBeInTheDocument()
     expect(within(tile('Rubric notes added')).getByText('1')).toBeInTheDocument()
+  })
+})
+
+describe('cancel — the cancelled-by-you banner (partial-completion contract)', () => {
+  it('shows a cancelled-by-you banner when cancelledAt is set', () => {
+    renderSummary({ cancelRequested: true, cancelledAt: '2026-08-14T18:05:00.000Z' })
+    expect(screen.getByTestId('cancelled-banner')).toBeInTheDocument()
+  })
+
+  it('omits the banner when the job finished without being cancelled', () => {
+    renderSummary()
+    expect(screen.queryByTestId('cancelled-banner')).toBeNull()
+  })
+
+  it('the "Skipped by you" tile reflects the items the cancellation drained', () => {
+    // skippedByUser already sums every user-attributed skip reason, including
+    // cancelled_by_user (D14 for cancel) — the drained items are simply part
+    // of that count, the same tile, no separate bucket.
+    renderSummary({
+      cancelRequested: true,
+      cancelledAt: '2026-08-14T18:05:00.000Z',
+      transferred: 1,
+      fallbackShell: 0,
+      skippedTotal: 4,
+      skippedByUser: 4,
+      skippedBySystem: 0,
+      totalItems: 5,
+      totalPostsScanned: 5,
+    })
+    const tile = screen.getByText('Skipped by you').closest('.stat-tile') as HTMLElement
+    expect(within(tile).getByText('4')).toBeInTheDocument()
   })
 })
 

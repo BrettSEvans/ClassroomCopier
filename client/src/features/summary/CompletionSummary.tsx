@@ -106,6 +106,22 @@ export function CompletionSummary({
         Transfer complete.
       </h2>
 
+      {/* Cancel — the partial-completion contract. `cancelledAt` is written in
+          the SAME statement as `status: 'completed'`, never a status of its
+          own, so this banner is the only thing that distinguishes a cancelled
+          run from a fully finished one. */}
+      {status.cancelledAt ? (
+        <div className="notice" data-testid="cancelled-banner">
+          <span className="glyph" aria-hidden="true">
+            !
+          </span>
+          <span>
+            You cancelled this transfer. The post in progress finished; every post still waiting
+            was skipped and counted below. Drafts already created stay as they are.
+          </span>
+        </div>
+      ) : null}
+
       <div className="stat-grid">
         <StatTile value={status.topicsCreatedOrMapped} label="Topics created/mapped" />
         <StatTile value={status.transferred} label="Drafts transferred" />

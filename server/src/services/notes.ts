@@ -13,6 +13,7 @@ export {
   attachmentFallbackNote,
   attachmentOverflowNote,
   attachmentSkippedByUserNote,
+  cancelledByUserNote,
   postCreatedFollowUpFailedNote,
   rateLimitExhaustionNote,
   rubricDegradedNote,
