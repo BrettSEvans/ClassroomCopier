@@ -147,13 +147,25 @@ export function CompletionSummary({
         </select>
       </div>
 
-      {/* UI-Δ1: horizontal scroll with a sticky Title column. Never cards. */}
-      <div className="log-scroll">
+      {/* UI-Δ1: horizontal scroll with a sticky Title column. Never cards.
+          tabIndex + aria-label make the scroll region itself keyboard-
+          reachable (arrow/Page keys scroll a focused element natively) —
+          without this, a keyboard-only user on a narrow viewport has no way
+          to reach the columns hidden past the fold. Nothing here traps
+          focus; Tab continues past the region exactly as it did before. */}
+      <div
+        className="log-scroll"
+        tabIndex={0}
+        role="region"
+        aria-label="Itemized transfer log, scrollable horizontally"
+      >
         <table className="log-table">
           <caption className="sr-only">Itemized log of every post in this transfer</caption>
           <thead>
             <tr>
-              <th scope="col">Title</th>
+              <th scope="col" className="log-title-col">
+                Title
+              </th>
               <th scope="col">Type</th>
               <th scope="col">Topic</th>
               <th scope="col">Outcome</th>
@@ -164,7 +176,7 @@ export function CompletionSummary({
           <tbody>
             {visible.map((item) => (
               <tr key={item.id}>
-                <td>{item.title}</td>
+                <td className="log-title-col">{item.title}</td>
                 <td>{item.typeLabel}</td>
                 <td>{item.topicName ?? '(none)'}</td>
                 <td>
