@@ -19,6 +19,7 @@ import { useSyncExternalStore } from 'react'
 import {
   ActiveJobResponseSchema,
   ApiErrorSchema,
+  CancelTransferJobResponseSchema,
   CourseListResponseSchema,
   CreateTransferJobResponseSchema,
   HealthResponseSchema,
@@ -31,6 +32,7 @@ import {
 } from '@classroom-copier/shared'
 import type {
   ActiveJobResponse,
+  CancelTransferJobResponse,
   CourseListResponse,
   CourseRole,
   CreateTransferJobRequest,
@@ -414,6 +416,22 @@ export function getJobStatus(jobId: string): Promise<TransferJobStatus> {
   return request(
     `/api/transfer-jobs/${encodeURIComponent(jobId)}/status`,
     TransferJobStatusSchema,
+  )
+}
+
+/**
+ * The mid-transfer Cancel control. Idempotent on the server while the job is
+ * non-terminal (200 every time); a job that has already finished answers 409
+ * `job_already_finished`, which surfaces here as an `ApiRequestError` like
+ * every other non-2xx response — there is no special-cased "not an error"
+ * path the way D5's double-submit 409 gets, because a cancel that arrives too
+ * late is genuinely a refusal, not self-healing.
+ */
+export function cancelTransferJob(jobId: string): Promise<CancelTransferJobResponse> {
+  return request(
+    `/api/transfer-jobs/${encodeURIComponent(jobId)}/cancel`,
+    CancelTransferJobResponseSchema,
+    { method: 'POST' },
   )
 }
 

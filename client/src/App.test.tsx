@@ -80,6 +80,8 @@ const COMPLETED: TransferJobStatus = {
   rubricNotesAdded: 1,
   currentItem: null,
   rateLimitPause: null,
+  cancelRequested: false,
+  cancelledAt: null,
   startedAt: null,
   finishedAt: null,
 }
@@ -190,11 +192,14 @@ describe('the linear wizard', () => {
 
     await userEvent.click(screen.getByRole('button', { name: 'Start Transfer' }))
 
-    // --- Step 3: Transfer. Back is gone once the batch write has started.
+    // --- Step 3: Transfer. Back is gone once the batch write has started,
+    // but Cancel transfer (the mid-transfer partial-completion control) is
+    // there instead — a half-completed batch write is not something Back can
+    // undo, but it IS something the teacher can stop from here on out.
     await waitFor(() => expect(currentStep()).toBe('3 Transfer'))
     await waitFor(() => expect(polledJobIds).toContain('job-1'))
     expect(backButton()).toBeNull()
-    expect(screen.queryByRole('button', { name: /cancel/i })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Cancel transfer' })).toBeInTheDocument()
 
     // --- Step 4: Summary.
     act(() => emit(COMPLETED))

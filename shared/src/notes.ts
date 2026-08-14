@@ -40,6 +40,18 @@ export function attachmentSkippedByUserNote(attachmentName: string): string {
   return attachmentFallbackNote(attachmentName)
 }
 
+/**
+ * The mid-transfer Cancel control's drain note — the teacher chose to stop,
+ * so plain, honest, house-register prose ("Cancelled by you…") is accurate
+ * attribution, the same as the existing Skip Post note. Never the
+ * "[Classroom Copier Note: …]" bracket form: that form marks text INJECTED
+ * INTO a created post's description, and a drained item never had a post
+ * created for it.
+ */
+export function cancelledByUserNote(): string {
+  return 'Cancelled by you before this post was attempted.'
+}
+
 /** Header for the overflow links appended into a post's description. */
 export const OVERFLOW_LINKS_HEADER = 'Additional attachments (beyond the 20-attachment limit):'
 

@@ -8,6 +8,7 @@ import {
   POLL_INTERVAL_MS,
   POLL_MAX_RETRIES,
   POLL_RETRY_BASE_MS,
+  cancelTransferJob,
   createTransferJob,
   getActiveJob,
   getJobItems,
@@ -64,6 +65,8 @@ const STATUS: TransferJobStatus = {
   rubricNotesAdded: 1,
   currentItem: null,
   rateLimitPause: null,
+  cancelRequested: false,
+  cancelledAt: null,
   startedAt: null,
   finishedAt: null,
 }
@@ -216,6 +219,29 @@ describe('transfer jobs', () => {
   it('reads health', async () => {
     fetchMock.mockResolvedValue(jsonResponse({ status: 'ok', uptimeMs: 12 }))
     await expect(health()).resolves.toEqual({ status: 'ok', uptimeMs: 12 })
+  })
+
+  it('POSTs the mid-transfer cancel and resolves the idempotent 200 body', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ jobId: 'job-1', cancelRequested: true }))
+    await expect(cancelTransferJob('job-1')).resolves.toEqual({
+      jobId: 'job-1',
+      cancelRequested: true,
+    })
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('http://localhost:4000/api/transfer-jobs/job-1/cancel')
+    expect(init.method).toBe('POST')
+  })
+
+  it('surfaces a cancel on an already-finished job as job_already_finished', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(
+        { error: { code: 'job_already_finished', message: 'This transfer has already finished.' } },
+        409,
+      ),
+    )
+    const error = await cancelTransferJob('job-1').catch((e: unknown) => e)
+    expect(error).toBeInstanceOf(ApiRequestError)
+    expect((error as ApiRequestError).code).toBe('job_already_finished')
   })
 })
 

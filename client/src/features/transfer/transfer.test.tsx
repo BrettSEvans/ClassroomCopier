@@ -36,6 +36,8 @@ function status(overrides: Partial<TransferJobStatus> = {}): TransferJobStatus {
     rubricNotesAdded: 0,
     currentItem: null,
     rateLimitPause: null,
+    cancelRequested: false,
+    cancelledAt: null,
     startedAt: null,
     finishedAt: null,
     ...overrides,
@@ -83,10 +85,81 @@ describe('Batch Transfer Progress', () => {
     expect(screen.getByText('Transferring 31 of 50 posts…')).toBeInTheDocument()
   })
 
-  it('offers no cancel control', async () => {
+  /* ---------------------------------------------------------------- *
+   * The mid-transfer Cancel control — the partial-completion contract.
+   * One click reveals an in-register confirm (never `window.confirm()`);
+   * confirming POSTs the cancel and lets the poll loop carry the screen to
+   * its normal terminal transition.
+   * ---------------------------------------------------------------- */
+
+  it('offers a Cancel transfer control while the job is running', async () => {
     await mount()
     act(() => emit(status({ pending: 20, transferred: 30 })))
-    expect(screen.queryByRole('button', { name: /cancel/i })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Cancel transfer' })).toBeInTheDocument()
+  })
+
+  it('one click reveals an in-register confirm, never the browser confirm()', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm')
+    await mount()
+    act(() => emit(status({ pending: 20, transferred: 30 })))
+
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel transfer' }))
+
+    expect(screen.getByText('Cancel the remaining posts?')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Cancel remaining posts' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Keep going' })).toBeInTheDocument()
+    expect(confirmSpy).not.toHaveBeenCalled()
+  })
+
+  it('"Keep going" dismisses the confirm without posting anything', async () => {
+    const cancelSpy = vi.spyOn(api, 'cancelTransferJob')
+    await mount()
+    act(() => emit(status({ pending: 20, transferred: 30 })))
+
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel transfer' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Keep going' }))
+
+    expect(screen.queryByText('Cancel the remaining posts?')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Cancel transfer' })).toBeInTheDocument()
+    expect(cancelSpy).not.toHaveBeenCalled()
+  })
+
+  it('confirming POSTs the cancel for the polled job', async () => {
+    const cancelSpy = vi
+      .spyOn(api, 'cancelTransferJob')
+      .mockResolvedValue({ jobId: 'job-1', cancelRequested: true })
+    await mount()
+    act(() => emit(status({ pending: 20, transferred: 30 })))
+
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel transfer' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel remaining posts' }))
+
+    expect(cancelSpy).toHaveBeenCalledWith('job-1')
+  })
+
+  it('transitions to the normal completion callback once the drained job reports terminal (cancelledAt set)', async () => {
+    vi.spyOn(api, 'cancelTransferJob').mockResolvedValue({ jobId: 'job-1', cancelRequested: true })
+    const { onComplete } = await mount()
+    act(() => emit(status({ pending: 20, transferred: 30 })))
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel transfer' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel remaining posts' }))
+
+    act(() =>
+      emit(
+        status({
+          status: 'completed',
+          pending: 0,
+          transferred: 30,
+          skippedTotal: 20,
+          skippedByUser: 20,
+          cancelRequested: true,
+          cancelledAt: '2026-08-14T18:05:00.000Z',
+        }),
+      ),
+    )
+
+    await waitFor(() => expect(onComplete).toHaveBeenCalledTimes(1))
+    expect(onComplete.mock.calls[0]![0]).toMatchObject({ cancelledAt: '2026-08-14T18:05:00.000Z' })
   })
 
   it('never lets the progress bar reverse or reset', async () => {

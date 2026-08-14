@@ -51,17 +51,25 @@ export type ShareMode = z.infer<typeof ShareModeSchema>
 export const OutcomeSchema = z.enum(['pending', 'transferred', 'fallback_shell', 'skipped'])
 export type Outcome = z.infer<typeof OutcomeSchema>
 
-/** Closed skip vocabulary. Exactly two of these are the teacher's choice. */
+/** Closed skip vocabulary. Exactly three of these are the teacher's choice. */
 export const SkipReasonSchema = z.enum([
   'user_skip_post',
   'user_skip_attachment',
+  'cancelled_by_user',
   'provider_error',
   'server_interrupted',
   'rate_limit_exhausted',
 ])
 export type SkipReason = z.infer<typeof SkipReasonSchema>
 
-export const USER_SKIP_REASONS: readonly SkipReason[] = ['user_skip_post', 'user_skip_attachment']
+/** `cancelled_by_user` — the teacher clicked Cancel, so every item the
+ *  cancellation drains is honestly "Skipped by you", the same as an
+ *  Action-Sheet skip. */
+export const USER_SKIP_REASONS: readonly SkipReason[] = [
+  'user_skip_post',
+  'user_skip_attachment',
+  'cancelled_by_user',
+]
 export const SYSTEM_SKIP_REASONS: readonly SkipReason[] = [
   'provider_error',
   'server_interrupted',
@@ -271,6 +279,14 @@ export const TransferJobStatusSchema = z.object({
   rubricNotesAdded: z.number().int().nonnegative(),
   currentItem: CurrentItemSchema.nullable(),
   rateLimitPause: RateLimitPauseSchema.nullable(),
+  /** The flag the executor reads BETWEEN items — never an external write to
+   *  item rows. True from the moment `POST /transfer-jobs/:id/cancel`
+   *  succeeds, whether or not the drain has finished yet. */
+  cancelRequested: z.boolean(),
+  /** Set in the SAME statement as `status: 'completed'` when the job's
+   *  remaining items were drained by a cancellation, never a status of its
+   *  own (mirrors D5's rate-limit-pause-is-a-field precedent). */
+  cancelledAt: z.string().nullable(),
   startedAt: z.string().nullable(),
   finishedAt: z.string().nullable(),
 })
@@ -278,6 +294,17 @@ export type TransferJobStatus = z.infer<typeof TransferJobStatusSchema>
 
 export const ActiveJobResponseSchema = z.object({ jobId: z.string() })
 export type ActiveJobResponse = z.infer<typeof ActiveJobResponseSchema>
+
+/**
+ * `POST /transfer-jobs/:id/cancel` — idempotent while the job is non-terminal.
+ * A cancel on an already-finished job is a 409 `job_already_finished`
+ * (`ApiErrorSchema`), never this shape.
+ */
+export const CancelTransferJobResponseSchema = z.object({
+  jobId: z.string(),
+  cancelRequested: z.literal(true),
+})
+export type CancelTransferJobResponse = z.infer<typeof CancelTransferJobResponseSchema>
 
 /**
  * Per-type field payload for the itemized log's "Type-specific fields" column.

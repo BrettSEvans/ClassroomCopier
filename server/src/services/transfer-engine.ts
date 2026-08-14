@@ -40,7 +40,13 @@
  */
 import { randomUUID } from 'node:crypto'
 import type { PrismaClient } from '@prisma/client'
-import type { Resolution, SkipReason } from '@classroom-copier/shared'
+import {
+  NON_TERMINAL_JOB_STATUSES,
+  isTerminalJobStatus,
+  type JobStatus,
+  type Resolution,
+  type SkipReason,
+} from '@classroom-copier/shared'
 import type { ClassroomProvider } from '../adapters/classroom-provider.interface.js'
 import {
   LicenseBlockedError,
@@ -55,6 +61,7 @@ import {
   OVERFLOW_LINKS_HEADER,
   attachmentFallbackNote,
   attachmentOverflowNote,
+  cancelledByUserNote,
   postCreatedFollowUpFailedNote,
   rateLimitExhaustionNote,
   rubricDegradedNote,
@@ -112,6 +119,57 @@ export class ExecutorLeaseLostError extends Error {
     super(`Executor lease for job ${jobId} was released; the reconciler owns it now`)
     this.name = 'ExecutorLeaseLostError'
   }
+}
+
+/** Cancel on a job that has already reached a terminal status — 409 at the route. */
+export class JobAlreadyFinishedError extends Error {
+  constructor(readonly jobId: string) {
+    super(`Transfer job ${jobId} has already finished`)
+    this.name = 'JobAlreadyFinishedError'
+  }
+}
+
+/** Cancel for a job id this account does not own (or that does not exist) — 404. */
+export class JobNotFoundError extends Error {}
+
+/**
+ * The mid-transfer Cancel control — a FLAG the executor reads BETWEEN items,
+ * never an external write to `TransferJobItem` rows while the executor holds
+ * the lease (P0-2's lease discipline is otherwise untouched: this function
+ * only ever touches the `TransferJob` row).
+ *
+ * Idempotent while the job is non-terminal: a second call while the job is
+ * still `queued`/`running` re-affirms the same flag rather than erroring, and
+ * `cancelRequestedAt` keeps the FIRST request's timestamp. A job that has
+ * already reached a terminal status refuses with `JobAlreadyFinishedError` —
+ * there is nothing left for the executor to drain.
+ */
+export async function requestJobCancellation(
+  prisma: PrismaClient,
+  input: { jobId: string; accountId: string; now?: Date },
+): Promise<{ jobId: string }> {
+  const job = await prisma.transferJob.findUnique({ where: { id: input.jobId } })
+  if (!job || job.accountId !== input.accountId) {
+    throw new JobNotFoundError(`Transfer job ${input.jobId} not found for this account`)
+  }
+  if (isTerminalJobStatus(job.status as JobStatus)) {
+    throw new JobAlreadyFinishedError(job.id)
+  }
+
+  // A conditional updateMany, the same P0-2-style guard as everywhere else in
+  // this file: if the job raced to a terminal status between the read above
+  // and this write, the flag is never set on a job nothing will ever drain.
+  const result = await prisma.transferJob.updateMany({
+    where: { id: job.id, status: { in: [...NON_TERMINAL_JOB_STATUSES] } },
+    data: {
+      cancelRequested: true,
+      cancelRequestedAt: job.cancelRequestedAt ?? (input.now ?? new Date()),
+    },
+  })
+  if (result.count === 0) throw new JobAlreadyFinishedError(job.id)
+
+  logger.jobEvent('cancel_requested', { jobId: job.id, accountId: input.accountId })
+  return { jobId: job.id }
 }
 
 /** The default freshness window for a pre-flight scan (APPLY-I). */
@@ -428,15 +486,43 @@ export class TransferEngine {
       },
     })) as ItemRow[]
 
+    // The mid-transfer Cancel control — checked BETWEEN items, never inside
+    // one. The in-flight item (already dispatched by the PREVIOUS iteration)
+    // always finishes naturally: a provider create cannot be un-asked. This
+    // check only decides whether the NEXT item dispatches, so once it is
+    // seen, no new item ever does.
+    let cancelledMidRun = false
     for (const item of items) {
+      const cancelState = await this.prisma.transferJob.findUnique({
+        where: { id: jobId },
+        select: { cancelRequested: true },
+      })
+      if (cancelState?.cancelRequested) {
+        cancelledMidRun = true
+        break
+      }
       const post = detail.get(`${item.sourceType}:${item.sourceId}`)
       const postResolution = perPost.get(item.scanItemId) ?? null
       await this.processItem(lease, targetCourseId, item, post, postResolution, topicMap)
       await this.heartbeat(lease)
     }
 
+    // The teacher's own choice — drain what never dispatched as an honest
+    // `skipped`/`cancelled_by_user`, the SAME bucket the totality invariant
+    // already accounts for. Every already-created draft stays exactly as it
+    // is: cancel never touches an item this job has already terminated.
+    let cancelledAt: Date | null = null
+    if (cancelledMidRun) {
+      const drained = await this.resolveRemainingPending(jobId, 'cancelled_by_user', {
+        note: cancelledByUserNote(),
+      })
+      cancelledAt = new Date()
+      logger.jobEvent('cancelled', { jobId, drained })
+    }
+
     // D12 part 2 — the sweep. This is the last line of defence that makes the
     // invariant hold for real rather than only where every branch remembered.
+    // (After a cancel-drain above, this finds nothing left to do.)
     const swept = await this.resolveRemainingPending(jobId, 'provider_error', {
       note: 'Resolved by the completion sweep — no branch recorded an outcome for this item.',
     })
@@ -448,6 +534,9 @@ export class TransferEngine {
     const finished = await this.prisma.transferJob.updateMany({
       where: { id: jobId, executorId },
       data: {
+        // NOT 'failed', and no new status: cancel is 'completed' with
+        // `cancelledAt` set, so the single-active-job guard, `/active`, and
+        // the reconciler all keep deriving from `status` alone.
         status: 'completed',
         // Releasing the partial unique index is what lets the account start
         // another transfer.
@@ -456,6 +545,7 @@ export class TransferEngine {
         finishedAt: new Date(),
         rateLimitPause: null,
         lastHeartbeatAt: new Date(),
+        ...(cancelledAt ? { cancelledAt } : {}),
       },
     })
     if (finished.count === 0) throw new ExecutorLeaseLostError(jobId)

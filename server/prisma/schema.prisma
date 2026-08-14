@@ -334,6 +334,22 @@ model TransferJob {
   startedAt             DateTime?
   finishedAt            DateTime?
 
+  /// The mid-transfer Cancel control's flag — the EXECUTOR READS this BETWEEN
+  /// items; it is never an external write to TransferJobItem rows while the
+  /// executor holds the lease. Set true (idempotently) by
+  /// `POST /transfer-jobs/:id/cancel`; refused with 409 once the job is
+  /// already terminal.
+  cancelRequested   Boolean   @default(false)
+  /// First time the flag was set — preserved across an idempotent second
+  /// cancel rather than overwritten.
+  cancelRequestedAt DateTime?
+  /// Written in the SAME statement as `status: 'completed'` when the
+  /// executor's own drain resolved the job's remaining items. Deliberately
+  /// NOT a status of its own (mirrors D5's rate-limit-pause-is-a-field
+  /// precedent) — the single-active-job guard, `/active`, and the reconciler
+  /// all still key off `status` alone.
+  cancelledAt       DateTime?
+
   /// D5 — a partial unique index, expressed the way SQLite can enforce one:
   /// this column holds `accountId` while the job is NON-TERMINAL and NULL once
   /// it reaches {completed, interrupted, failed}. SQLite treats NULLs as

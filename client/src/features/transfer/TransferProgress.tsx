@@ -22,18 +22,27 @@
  *    that reached `failed` SERVER-side offers no Retry, because retrying a
  *    terminal failure cannot succeed; it routes back to Selection instead.
  *
- * There is no cancel control in v1 (02-ux-workflow.md Decisions #13).
+ * The mid-transfer Cancel control (the partial-completion contract, decided).
+ * One click reveals an IN-REGISTER confirm — never `window.confirm()` — and
+ * confirming POSTs the cancel and steps back; the poll loop above is already
+ * the only thing that carries this screen to its terminal transition, so
+ * confirming does nothing but ask the server to start draining. The server
+ * finishes the in-flight item naturally, drains the rest as
+ * `skipped`/`cancelled_by_user`, and the job still lands `completed` (with
+ * `cancelledAt` set) — never `failed`, and no new status — so this screen's
+ * own `isTerminalJobStatus` handling needs no special case for it.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { CurrentItem, TransferJobStatus } from '@classroom-copier/shared'
 import { isTerminalJobStatus } from '@classroom-copier/shared'
 import {
+  Button,
   ErrorState,
   NarrationBanner,
   OutcomeIcon,
   RATE_LIMIT_NOTICE,
 } from '../../components/shared'
-import { getActiveJob, isAbortError, pollJobStatus } from '../../lib/api-client'
+import { cancelTransferJob, getActiveJob, isAbortError, pollJobStatus } from '../../lib/api-client'
 
 /** "every 5 items or every ~3 seconds, whichever is LESS frequent" — so both. */
 export const ANNOUNCE_EVERY_ITEMS = 5
@@ -71,6 +80,9 @@ export function TransferProgress({
   const [pollFailed, setPollFailed] = useState(false)
   /** P0-5 — bumping this re-runs the poll effect. THIS is what Retry does. */
   const [restartToken, setRestartToken] = useState(0)
+  /** The Cancel control's in-register confirm — never `window.confirm()`. */
+  const [confirmingCancel, setConfirmingCancel] = useState(false)
+  const [cancelling, setCancelling] = useState(false)
 
   /** The bar is monotonic: it freezes on pause and never reverses (§3). */
   const highWater = useRef(0)
@@ -163,6 +175,20 @@ export function TransferProgress({
     setRestartToken((token) => token + 1)
   }, [])
 
+  const requestCancel = useCallback(() => setConfirmingCancel(true), [])
+  const keepGoing = useCallback(() => setConfirmingCancel(false), [])
+  const confirmCancel = useCallback(() => {
+    if (!status) return
+    setCancelling(true)
+    // Fire-and-forget from the screen's point of view: the flag lives
+    // server-side, and the poll loop already running above is what carries
+    // this screen to its normal terminal transition once the drain finishes
+    // (status='completed', cancelledAt set — never a special case here).
+    void cancelTransferJob(status.jobId)
+      .catch(() => {})
+      .finally(() => setConfirmingCancel(false))
+  }, [status])
+
   // The rate-limit countdown ticks locally between polls.
   useEffect(() => {
     if (countdownMs === null) return undefined
@@ -233,6 +259,35 @@ export function TransferProgress({
             {RATE_LIMIT_NOTICE(Math.ceil((countdownMs ?? status.rateLimitPause.retryInMs) / 1000))}
           </NarrationBanner>
         ) : null}
+
+        {confirmingCancel ? (
+          <div className="notice" role="alert" data-testid="cancel-confirm-banner">
+            <span className="glyph" aria-hidden="true">
+              !
+            </span>
+            <div className="cancel-confirm-body">
+              <p className="cancel-confirm-question">Cancel the remaining posts?</p>
+              <p className="cancel-confirm-detail">
+                The post being copied right now will finish. Every post still waiting will be
+                skipped — already-copied drafts stay exactly as they are.
+              </p>
+              <div className="cancel-confirm-actions">
+                <Button variant="secondary" onClick={confirmCancel}>
+                  Cancel remaining posts
+                </Button>
+                <Button variant="link" onClick={keepGoing}>
+                  Keep going
+                </Button>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="cancel-row">
+            <Button variant="secondary" onClick={requestCancel} disabled={cancelling}>
+              {cancelling ? 'Cancelling…' : 'Cancel transfer'}
+            </Button>
+          </div>
+        )}
 
         {/* One region. Throttled. Never per item. */}
         <div
