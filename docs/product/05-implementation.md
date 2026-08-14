@@ -224,9 +224,17 @@ exists to prevent.
 
 **Fixed, in four parts.** (1) `TransferJobItem.claimedTargetPostId` is written
 the instant `issueCreate` returns and before anything else can throw — evidence
-the job owns. (2) The catch is evidence-aware: an already-terminal item has the
-late failure *appended to its note*, never re-bucketed; a `pending` item with a
-claimed post is finished as `transferred` with that id. (3) `finish()` is now
+the job owns. (2) The protection is
+three layers deep, not one mechanism (QA-5 precision note, cycle 2): the
+`clearPause` failure path is caught by the evidence-aware catch in
+`recordItemFailure`; the `getRubric` and description-amendment failures are
+caught a layer earlier, by local try/catch inside `copyRubricIfAny` and the
+post-create amendment block, and under current code never reach
+`recordItemFailure` at all. Whichever layer catches, the behaviour is the same:
+an already-terminal item has the late failure *appended to its note*, never
+re-bucketed; a `pending` item with a claimed post is finished as `transferred`
+with that id. QA verified the three layers as genuine defense-in-depth by
+breaking all three together and watching the gate go red. (3) `finish()` is now
 `updateMany({ where: { id, outcome: 'pending' } })`, so overwriting a terminal
 outcome is unrepresentable, and a zero-row update logs at ERROR. (4) `getRubric`
 moved inside `copyRubricIfAny`'s try, and the whole post-create block (rubric

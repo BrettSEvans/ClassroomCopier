@@ -343,10 +343,14 @@ QA.
    50 posts, when the batch transfer runs, then the progress view shows a
    live counter advancing from 0/50 to 50/50 with per-item ticker updates,
    and total engine time stays within the brief's ~2-minute target.
-8. **Cold-start state.** Given the backend has been idle >15 minutes, when
-   the user takes the first action requiring the backend, then a "Waking up
-   server…" overlay displays until the backend responds, then clears
-   automatically without user action.
+8. **Cold-start state.** Given any backend call remains unresolved for more
+   than ~2 seconds (the latency-triggered mechanism the architecture adopted
+   as D29 — superseding this scenario's original ">15 minutes idle"
+   precondition, which the product does not implement because the client
+   cannot know the server's idle time), then a "Waking up server…" overlay
+   displays until the backend responds, then clears automatically without
+   user action. Idle >15 minutes on Render's free tier is the typical CAUSE
+   of such latency, not the detection mechanism.
 9. **Rate-limit resilience (F6).** Given the deterministic mid-batch 429
    condition, when the transfer engine receives a 429, then the progress view
    pauses with a visible retry countdown and resumes automatically with no
