@@ -5,14 +5,22 @@
  */
 import type { Outcome } from '@classroom-copier/shared'
 
-const PILL: Record<Outcome, { text: string; className: string }> = {
-  pending: { text: 'In progress', className: 'outcome-skipped' },
-  transferred: { text: 'Transferred', className: 'outcome-transferred' },
-  fallback_shell: { text: 'Fallback', className: 'outcome-fallback' },
-  skipped: { text: 'Skipped', className: 'outcome-skipped' },
+/** The exact on-screen text for each outcome — also the source the CSV
+ *  export (Fix 5a) reuses, so the file matches the table exactly. */
+export const OUTCOME_TEXT: Record<Outcome, string> = {
+  pending: 'In progress',
+  transferred: 'Transferred',
+  fallback_shell: 'Fallback',
+  skipped: 'Skipped',
+}
+
+const CLASS_NAME: Record<Outcome, string> = {
+  pending: 'outcome-skipped',
+  transferred: 'outcome-transferred',
+  fallback_shell: 'outcome-fallback',
+  skipped: 'outcome-skipped',
 }
 
 export function OutcomePill({ outcome }: { outcome: Outcome }) {
-  const { text, className } = PILL[outcome]
-  return <span className={`outcome-pill ${className}`}>{text}</span>
+  return <span className={`outcome-pill ${CLASS_NAME[outcome]}`}>{OUTCOME_TEXT[outcome]}</span>
 }

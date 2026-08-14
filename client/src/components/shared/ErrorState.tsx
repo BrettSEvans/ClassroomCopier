@@ -30,8 +30,8 @@ export function ErrorState({ onRetry, onStartOver, detail }: ErrorStateProps) {
       <h2>Something went wrong</h2>
       <p>
         {onRetry
-          ? 'The transfer could not be completed. Nothing was lost — you can try again, or start over from the beginning.'
-          : 'The transfer could not be completed. Nothing was lost — the itemized log records everything that had already been copied, and you can start over from the beginning.'}
+          ? 'Nothing was lost. You can try again, or start over from the beginning.'
+          : 'Nothing was lost. You can start over from the beginning.'}
       </p>
       {detail ? <p className="mock-note">{detail}</p> : null}
       <div className="error-actions">

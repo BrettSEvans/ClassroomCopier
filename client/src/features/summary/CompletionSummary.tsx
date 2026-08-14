@@ -19,7 +19,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { Outcome, TransferJobItemRow, TransferJobStatus, TypeSpecificFields } from '@classroom-copier/shared'
-import { Button, OutcomePill } from '../../components/shared'
+import { Button, OUTCOME_TEXT, OutcomePill } from '../../components/shared'
 
 type OutcomeFilter = 'all' | 'transferred' | 'fallback_shell' | 'skipped'
 
@@ -58,6 +58,76 @@ function TypeSpecificCell({ fields }: { fields: TypeSpecificFields }) {
         </td>
       )
   }
+}
+
+/**
+ * 5a — the plain-text mirror of `TypeSpecificCell`'s content for each type,
+ * used by the CSV export. The `none` case is genuinely empty here too — no
+ * decorative em dash, since a CSV cell has no "decoration".
+ */
+function typeSpecificText(fields: TypeSpecificFields): string {
+  switch (fields.kind) {
+    case 'graded':
+      return `Due: cleared · Max pts: ${fields.maxPoints ?? '—'}`
+    case 'multipleChoice':
+      return `Answer: Multiple choice (${fields.optionCount} opts)`
+    case 'shortAnswer':
+      return 'Answer: Short answer'
+    case 'none':
+    default:
+      return ''
+  }
+}
+
+/** RFC 4180 — a field is quoted only when it contains a comma, a double
+ *  quote, or a line break; an embedded quote is escaped by doubling it. */
+function csvField(value: string): string {
+  return /[",\r\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value
+}
+
+const LOG_CSV_HEADER = ['Title', 'Type', 'Topic', 'Outcome', 'Type-specific fields', 'Note']
+
+/**
+ * 5a — client-side CSV of the itemized log, mirroring the on-screen table
+ * exactly: same six columns, same values, the FULL log regardless of the
+ * outcome filter currently applied on screen (an export that silently
+ * dropped filtered-out rows would be its own kind of silent drop).
+ */
+export function buildLogCsv(items: TransferJobItemRow[]): string {
+  const rows = [
+    LOG_CSV_HEADER,
+    ...items.map((item) => [
+      item.title,
+      item.typeLabel,
+      item.topicName ?? '(none)',
+      OUTCOME_TEXT[item.outcome],
+      typeSpecificText(item.typeSpecific),
+      item.note ?? '',
+    ]),
+  ]
+  return rows.map((row) => row.map(csvField).join(',')).join('\r\n')
+}
+
+export function logCsvFilename(jobId: string): string {
+  return `classroom-copier-log-${jobId}.csv`
+}
+
+/**
+ * NOTE: this viewer environment's sandbox can make an anchor-download inert,
+ * but `URL.createObjectURL` + a synthetic anchor click is the standard
+ * client-only download mechanism and works in a real browser — the part
+ * that is actually tested is `buildLogCsv`'s output, not this click path.
+ */
+function downloadLogCsv(jobId: string, items: TransferJobItemRow[]): void {
+  const blob = new Blob([buildLogCsv(items)], { type: 'text/csv;charset=utf-8;' })
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = logCsvFilename(jobId)
+  document.body.appendChild(anchor)
+  anchor.click()
+  document.body.removeChild(anchor)
+  URL.revokeObjectURL(url)
 }
 
 function StatTile({ value, label }: { value: number; label: string }) {
@@ -192,6 +262,9 @@ export function CompletionSummary({
       </div>
 
       <div className="summary-actions">
+        <Button variant="secondary" onClick={() => downloadLogCsv(status.jobId, items)}>
+          Export log (CSV)
+        </Button>
         <Button variant="secondary" onClick={onOpenTargetCourse}>
           Open target course (mock link)
         </Button>

@@ -15,13 +15,14 @@ export function attachmentFallbackNote(attachmentName: string): string {
 }
 
 /**
- * Architect-proposed (no exact string existed upstream) — Δ2 routes it to
- * whoever owns copy before ship. Deliberately a DIFFERENT string from the
- * attachment note: the two describe different events and F13's gate asserts
- * they differ.
+ * 5b — content pass on the architect-proposed placeholder (03-ui-direction.md
+ * §4 register: plainspoken, fact-then-action, never a hedge). Deliberately a
+ * DIFFERENT string from the attachment note: the two describe different
+ * events and F13's gate asserts they differ, not that either matches a
+ * hard-coded literal (Δ2).
  */
 export function rateLimitExhaustionNote(attempts: number): string {
-  return `[Classroom Copier Note: Google was rate-limiting requests and this post could not be copied in full after ${attempts} attempts. A draft shell was created so nothing was lost — re-attach any files and re-check the details before publishing.]`
+  return `[Classroom Copier Note: Google was rate-limiting requests. This post could not be copied in full after ${attempts} attempts, so a draft shell was created here instead. Re-attach any files and check the details before publishing.]`
 }
 
 /** F7 — rubric could not be copied because the mock licence tier blocks it. */

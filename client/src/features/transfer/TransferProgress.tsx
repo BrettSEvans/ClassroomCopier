@@ -46,9 +46,23 @@ interface TransferProgressProps {
   onComplete: (status: TransferJobStatus) => void
   /** Where "Start Over" goes: back to Selection. */
   onStartOver: () => void
+  /**
+   * DEFER 2 — the caller already resolved `GET /transfer-jobs/active` itself
+   * (App's own mount effect does this for the F12 reconnect path) and handed
+   * the result down as `jobId`. When true, this screen trusts `jobId`
+   * outright instead of repeating the same discovery fetch a second time.
+   * Defaults to false so a screen mounted on its own (including these unit
+   * tests) still performs its own discovery, unchanged.
+   */
+  skipDiscovery?: boolean
 }
 
-export function TransferProgress({ jobId, onComplete, onStartOver }: TransferProgressProps) {
+export function TransferProgress({
+  jobId,
+  onComplete,
+  onStartOver,
+  skipDiscovery = false,
+}: TransferProgressProps) {
   const [status, setStatus] = useState<TransferJobStatus | null>(null)
   const [ticker, setTicker] = useState<CurrentItem[]>([])
   const [announcement, setAnnouncement] = useState('')
@@ -111,20 +125,26 @@ export function TransferProgress({ jobId, onComplete, onStartOver }: TransferPro
     // APPLY-M — the discovery request is aborted if this screen goes away.
     const controller = new AbortController()
 
-    getActiveJob(controller.signal)
-      .catch((error: unknown) => {
-        // A failed discovery is not fatal: fall back to the job we were handed.
-        if (!isAbortError(error)) return null
-        return null
+    const startPolling = (target: string | null) => {
+      if (!live || !target) return
+      cancelPoll = pollJobStatus(target, handleTick, () => {
+        if (live) setPollFailed(true)
       })
-      .then((active) => {
-        if (!live) return
-        const target = active ?? jobId
-        if (!target) return
-        cancelPoll = pollJobStatus(target, handleTick, () => {
-          if (live) setPollFailed(true)
+    }
+
+    if (skipDiscovery) {
+      // DEFER 2 — the caller already discovered this job; do not repeat
+      // `GET /transfer-jobs/active` for the same reconnect.
+      startPolling(jobId)
+    } else {
+      getActiveJob(controller.signal)
+        .catch((error: unknown) => {
+          // A failed discovery is not fatal: fall back to the job we were handed.
+          if (!isAbortError(error)) return null
+          return null
         })
-      })
+        .then((active) => startPolling(active ?? jobId))
+    }
 
     return () => {
       live = false
@@ -132,8 +152,8 @@ export function TransferProgress({ jobId, onComplete, onStartOver }: TransferPro
       cancelPoll?.()
     }
     // Deps are deliberately just `restartToken`: restarting is an explicit user
-    // action, never a consequence of a re-render. Adding `jobId`/`handleTick`
-    // here would start a second poll loop.
+    // action, never a consequence of a re-render. Adding
+    // `jobId`/`handleTick`/`skipDiscovery` here would start a second poll loop.
   }, [restartToken])
 
   const restart = useCallback(() => {

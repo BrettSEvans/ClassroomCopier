@@ -339,3 +339,9 @@ table.log-table tbody tr:hover td.log-title-col{ background:var(--teal-100); }
   padding:2px 9px; margin-bottom:14px;
 }
 .error-actions{ display:flex; gap:10px; justify-content:center; }
+/* Fix 1 — a stale/already-used scan is not a true failure (red-700 is
+   reserved for those); it reuses the error-state layout with the amber
+   "attention" treatment instead. */
+.error-state .error-glyph.notice-glyph{
+  color:var(--amber-700); background:var(--amber-100); border-color:var(--amber-700);
+}

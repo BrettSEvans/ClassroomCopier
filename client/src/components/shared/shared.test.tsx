@@ -226,4 +226,23 @@ describe('ErrorState', () => {
     render(<ErrorState onRetry={() => {}} onStartOver={() => {}} detail="The server did not respond in time." />)
     expect(screen.getByText('The server did not respond in time.')).toBeInTheDocument()
   })
+
+  /**
+   * Fix 2 — this is the app-wide catch-all (App.tsx's bare `if (error)`
+   * branch renders it with no `detail` at all), yet the body copy hard-coded
+   * "the transfer" and "the itemized log" — wrong for a session-load failure,
+   * an active-job lookup failure, or a render-time crash on Selection, none
+   * of which involve a transfer or a log. The default body must stay generic.
+   */
+  it('keeps the default body generic rather than assuming a transfer/log context that is not always true', () => {
+    const { rerender } = render(<ErrorState onRetry={() => {}} onStartOver={() => {}} />)
+    let body = screen.getByTestId('error-state').textContent ?? ''
+    expect(body).not.toMatch(/the transfer/i)
+    expect(body).not.toMatch(/itemized log/i)
+
+    rerender(<ErrorState onStartOver={() => {}} />)
+    body = screen.getByTestId('error-state').textContent ?? ''
+    expect(body).not.toMatch(/the transfer/i)
+    expect(body).not.toMatch(/itemized log/i)
+  })
 })
