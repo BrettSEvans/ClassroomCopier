@@ -360,11 +360,21 @@ export class TransferEngine {
     if (!job) throw new Error(`TransferJob ${jobId} not found`)
 
     // P0-2 — take the lease. `updateMany` with the non-terminal predicate means
-    // a job the reconciler has already resolved cannot be re-entered, and two
-    // simultaneous executors cannot both believe they own it.
+    // a job the reconciler has already resolved cannot be re-entered.
+    //
+    // Two-process lease harness finding — `status: {in: ['queued','running']}`
+    // ALONE does not stop two simultaneous executors from both believing they
+    // own it, despite the comment above claiming otherwise: 'running' stays in
+    // that allowed set after the FIRST claim commits, so a second concurrent
+    // claim's WHERE still matches and it silently overwrites `executorId`
+    // (proven by `test/lease-mp/executor-lease-two-process.test.ts` racing two
+    // real OS processes against one SQLite file — both `updateMany` calls
+    // returned `count: 1`). `executorId: null` closes it: only the claim that
+    // observes the lease still unheld can take it, so a second concurrent
+    // claim's WHERE no longer matches and its `count` is 0.
     const executorId = `exec-${randomUUID()}`
     const claimed = await this.prisma.transferJob.updateMany({
-      where: { id: jobId, status: { in: ['queued', 'running'] } },
+      where: { id: jobId, status: { in: ['queued', 'running'] }, executorId: null },
       data: {
         status: 'running',
         executorId,

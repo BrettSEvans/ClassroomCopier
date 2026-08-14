@@ -30,7 +30,8 @@
     "check:citations": "node scripts/check-doc-citations.mjs",
     "test:e2e": "playwright test --config=e2e/playwright.config.ts",
     "test:budget:lease": "npm run -w server test:budget:lease",
-    "test:budget:courses": "npm run -w server test:budget:courses"
+    "test:budget:courses": "npm run -w server test:budget:courses",
+    "test:lease-mp": "npm run -w server test:lease-mp"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.13.0",

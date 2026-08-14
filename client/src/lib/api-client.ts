@@ -169,6 +169,16 @@ export function useColdStart(): ColdStartState {
  * The request core
  * ------------------------------------------------------------------ */
 
+/**
+ * CSRF hardening (server `middleware/csrf.ts`) — every state-changing method
+ * must carry this header or the server answers 403 `csrf_header_missing`.
+ * Set here, in the one choke point every call flows through, rather than at
+ * each call site, so no future mutating call can forget it.
+ */
+const CSRF_HEADER_NAME = 'X-Classroom-Copier'
+const CSRF_HEADER_VALUE = '1'
+const CSRF_PROTECTED_METHODS = new Set(['POST', 'PATCH', 'DELETE'])
+
 interface RequestOptions {
   method?: 'GET' | 'POST'
   body?: unknown
@@ -223,13 +233,17 @@ async function rawRequest(path: string, options: RequestOptions = {}): Promise<R
   }
 
   try {
+    const method = options.method ?? 'GET'
+    const headers: Record<string, string> = {}
+    if (options.body !== undefined) headers['content-type'] = 'application/json'
+    if (CSRF_PROTECTED_METHODS.has(method)) headers[CSRF_HEADER_NAME] = CSRF_HEADER_VALUE
+
     const response = await fetch(`${API_BASE_URL}${path}`, {
-      method: options.method ?? 'GET',
+      method,
       credentials: 'include',
       signal: controller.signal,
-      ...(options.body === undefined
-        ? {}
-        : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(options.body) }),
+      ...(Object.keys(headers).length > 0 ? { headers } : {}),
+      ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
     })
 
     let body: unknown = null

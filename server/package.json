@@ -20,7 +20,8 @@
     "test:budget:f12": "vitest run test/quality/f12-reconnect.budget.test.ts",
     "test:budget:reconcile": "vitest run test/quality/job-reconciler.budget.test.ts",
     "test:budget:lease": "vitest run test/quality/executor-lease.budget.test.ts",
-    "test:budget:courses": "vitest run test/quality/courses-list.budget.test.ts"
+    "test:budget:courses": "vitest run test/quality/courses-list.budget.test.ts",
+    "test:lease-mp": "vitest run --config vitest.lease-mp.config.ts"
   },
   "dependencies": {
     "@classroom-copier/shared": "*",
