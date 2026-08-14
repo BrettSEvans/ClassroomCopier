@@ -1,0 +1,1083 @@
+/**
+ * transfer-engine — the batch transfer orchestrator.
+ *
+ * This module carries the run's core promise, so the things that make it hold
+ * are stated up front:
+ *
+ *  1. **The outcome function is TOTAL (D12).** Every per-item execution is
+ *     wrapped in try/catch whose catch resolves the item to a terminal outcome.
+ *     Before this, only `RateLimitError` had a declared exit from `pending` —
+ *     `PermissionError`, `NotFoundError` and any unexpected exception left the
+ *     item `pending` forever, so the three terminal buckets summed to LESS than
+ *     count(items) and the "guarantee" was prose.
+ *  2. **The outcome function is also HONEST (D32, P0-1).** Totality alone made
+ *     things worse: the catch was unconditional, so it fired *after* a
+ *     successful create and rewrote a real post into `skipped`/`provider_error`
+ *     with `targetPostId` nulled and a note reading "Nothing was written to the
+ *     target course". Two mechanisms now make that unrepresentable rather than
+ *     merely unintended:
+ *       - `claimedTargetPostId` is written IMMEDIATELY after `issueCreate`
+ *         returns and before anything else can throw, so the catch has evidence
+ *         the job itself owns; and
+ *       - `finish()` carries an optimistic `outcome: 'pending'` predicate, so
+ *         overwriting an already-terminal outcome is not expressible.
+ *  3. **A sweep before `completed`.** No job reaches `completed` with a pending
+ *     item; if one survives the loop, it is resolved and logged at ERROR.
+ *  4. **The executor's top level catches** and marks the job `failed` —
+ *     previously a status nothing in the system ever assigned.
+ *  5. **The executor holds a LEASE (D33, P0-2).** `execute()` claims the job
+ *     with a fresh `executorId` and every subsequent executor write is
+ *     `updateMany where {id, executorId}`. The reconciler claims a stale job by
+ *     nulling that column, so a displaced executor's next write affects zero
+ *     rows and it aborts. Before this, staleness was the reconciler's only
+ *     predicate: it could rewrite a live executor's items and null
+ *     `activeAccountId` mid-run, releasing the single-active-job guard and
+ *     admitting a second executor into the same target course.
+ *
+ * And on the fallback path: the rate-limit-exhaustion shell is a DIFFERENT CALL
+ * with a DIFFERENT PAYLOAD (bare, no materials[]). Re-issuing the same failing
+ * create is why the "guaranteed" shell was unreachable.
+ */
+import { randomUUID } from 'node:crypto'
+import type { PrismaClient } from '@prisma/client'
+import type { Resolution, SkipReason } from '@classroom-copier/shared'
+import type { ClassroomProvider } from '../adapters/classroom-provider.interface.js'
+import {
+  LicenseBlockedError,
+  RateLimitError,
+  type CourseWorkPayload,
+  type Material,
+  type ProviderAttachment,
+} from '../adapters/types.js'
+import { logger } from '../logger.js'
+import { DEFAULT_BACKOFF, MAX_ATTEMPTS, backoffDelayMs, type BackoffPolicy } from './backoff.js'
+import {
+  OVERFLOW_LINKS_HEADER,
+  attachmentFallbackNote,
+  attachmentOverflowNote,
+  postCreatedFollowUpFailedNote,
+  rateLimitExhaustionNote,
+  rubricDegradedNote,
+  shareModeUnknownNote,
+} from './notes.js'
+import { enumeratePosts, type EnumeratedPost } from './post-enumerator.js'
+import { countOutcomes } from './reconciliation.js'
+import { buildPostResolutions, type PostResolutions, type ResolvedFinding } from './resolutions.js'
+
+export const ATTACHMENT_CAP = 20
+
+/** D5 — the single-active-job guard refused a second job for this account. */
+export class ActiveJobConflictError extends Error {
+  constructor(readonly existingJobId: string) {
+    super(`Account already has a non-terminal transfer job (${existingJobId})`)
+    this.name = 'ActiveJobConflictError'
+  }
+}
+
+export class ScanNotFoundError extends Error {}
+
+/**
+ * APPLY-C — a scan has already produced a job. `TransferJob.scanId` is `@unique`,
+ * so replaying a scan (back button, then confirm again) is refused by the
+ * database rather than quietly copying every post a second time.
+ */
+export class ScanAlreadyUsedError extends Error {
+  constructor(readonly existingJobId: string) {
+    super(`Pre-flight scan already produced transfer job ${existingJobId}`)
+    this.name = 'ScanAlreadyUsedError'
+  }
+}
+
+/**
+ * APPLY-I — the scan is a SNAPSHOT. A post added to the source after the scan is
+ * correctly excluded from the job; staying silent about that in a product whose
+ * thesis is "we never lie about what happened" is the gap. An old scan is
+ * refused so the teacher re-scans instead of being told "N of N" about an N
+ * measured an hour ago.
+ */
+export class ScanStaleError extends Error {
+  constructor(readonly scannedAt: Date) {
+    super(`Pre-flight scan from ${scannedAt.toISOString()} is too old to transfer`)
+    this.name = 'ScanStaleError'
+  }
+}
+
+/**
+ * P0-2 — raised when an executor discovers the reconciler has taken its job.
+ * It is NOT a failure of the transfer: the reconciler now owns the job's
+ * terminal state, so the executor must stop writing rather than race it.
+ */
+export class ExecutorLeaseLostError extends Error {
+  constructor(readonly jobId: string) {
+    super(`Executor lease for job ${jobId} was released; the reconciler owns it now`)
+    this.name = 'ExecutorLeaseLostError'
+  }
+}
+
+/** The default freshness window for a pre-flight scan (APPLY-I). */
+export const DEFAULT_SCAN_TTL_MS = 10 * 60 * 1000
+
+/**
+ * D11 — job creation, in one place.
+ *
+ * Items are inserted **from the stored `PreflightScanItem` rows**, in the same
+ * transaction, before any provider call. They are never produced by a fresh
+ * re-enumeration of the source course. That is the whole mechanism behind
+ * `count(items) == scan.totalPostsScanned`: one measurement, two readers. The
+ * previous design ran two independent scans in two separate requests and called
+ * their equality definitional.
+ *
+ * D5 — the single-active-job guard is the `activeAccountId` partial unique
+ * index. A conflict surfaces as `409 {jobId}` rather than a hard error, so an
+ * accidental double-submit self-heals into "attach to the job already running".
+ */
+export async function createTransferJob(
+  prisma: PrismaClient,
+  input: {
+    accountId: string
+    scanId: string
+    resolutions: Resolution[]
+    /** APPLY-I. Pass `null` to disable the freshness check (tests, tooling). */
+    scanTtlMs?: number | null
+    now?: Date
+  },
+): Promise<{ jobId: string }> {
+  const scan = await prisma.preflightScan.findUnique({
+    where: { id: input.scanId },
+    include: { items: { orderBy: { createdOrder: 'asc' } } },
+  })
+  if (!scan || scan.accountId !== input.accountId) {
+    throw new ScanNotFoundError(`Pre-flight scan ${input.scanId} not found for this account`)
+  }
+
+  const ttl = input.scanTtlMs === undefined ? DEFAULT_SCAN_TTL_MS : input.scanTtlMs
+  if (ttl != null) {
+    const age = (input.now ?? new Date()).getTime() - scan.scannedAt.getTime()
+    if (age > ttl) throw new ScanStaleError(scan.scannedAt)
+  }
+
+  // APPLY-C — a consumed scan is a fast-path read; the @unique index below is
+  // the real guard.
+  const replay = await prisma.transferJob.findUnique({
+    where: { scanId: scan.id },
+    select: { id: true },
+  })
+  if (replay) throw new ScanAlreadyUsedError(replay.id)
+
+  const existing = await prisma.transferJob.findFirst({
+    where: { accountId: input.accountId, status: { in: ['queued', 'running'] } },
+    select: { id: true },
+  })
+  if (existing) throw new ActiveJobConflictError(existing.id)
+
+  const jobId = `job-${randomUUID()}`
+  try {
+    await prisma.$transaction([
+      prisma.transferJob.create({
+        data: {
+          id: jobId,
+          accountId: input.accountId,
+          scanId: scan.id,
+          status: 'queued',
+          resolutionsJson: JSON.stringify(input.resolutions),
+          activeAccountId: input.accountId,
+        },
+      }),
+      prisma.transferJobItem.createMany({
+        data: scan.items.map((item) => ({
+          id: `${jobId}-i${item.createdOrder}`,
+          jobId,
+          scanItemId: item.id,
+          sourceType: item.sourceType,
+          sourceId: item.sourceId,
+          title: item.title,
+          workType: item.workType,
+          // APPLY-E — the per-type fields travel with the item, so the itemized
+          // log renders what was copied rather than re-reading a source row
+          // that may since have been edited or deleted.
+          maxPoints: item.maxPoints,
+          answerConfig: item.answerConfig,
+          topicName: item.topicName,
+          createdOrder: item.createdOrder,
+          outcome: 'pending',
+        })),
+      }),
+    ])
+  } catch (error) {
+    // Two partial unique indexes are the real guards; the reads above are only
+    // fast paths. A concurrent double-submit loses the race here, not silently.
+    const replayed = await prisma.transferJob.findUnique({
+      where: { scanId: scan.id },
+      select: { id: true },
+    })
+    if (replayed) throw new ScanAlreadyUsedError(replayed.id)
+    const conflict = await prisma.transferJob.findFirst({
+      where: { accountId: input.accountId, status: { in: ['queued', 'running'] } },
+      select: { id: true },
+    })
+    if (conflict) throw new ActiveJobConflictError(conflict.id)
+    throw error
+  }
+
+  logger.jobEvent('created', {
+    jobId,
+    accountId: input.accountId,
+    scanId: scan.id,
+    items: scan.items.length,
+    totalPostsScanned: scan.totalPostsScanned,
+  })
+  return { jobId }
+}
+
+export interface TransferEngineOptions {
+  backoff?: BackoffPolicy
+  /** Injected so tests do not actually sleep through five real backoffs. */
+  sleep?: (ms: number) => Promise<void>
+  /**
+   * D28/K — the monetization completion hook is an INJECTED CALLBACK, keeping
+   * the dependency edge pointing the right way while giving the hook a real
+   * code path. It previously existed in one module's prose and in no module's
+   * code.
+   */
+  onJobComplete?: (summary: {
+    jobId: string
+    accountId: string
+    cleanTransfer: boolean
+  }) => Promise<void> | void
+}
+
+interface ItemRow {
+  id: string
+  scanItemId: string
+  sourceType: string
+  sourceId: string
+  title: string
+  createdOrder: number
+}
+
+/** P0-2 — the executor's proof that it still owns this job. */
+interface Lease {
+  jobId: string
+  executorId: string
+  accountId: string
+}
+
+interface CreateContext {
+  targetCourseId: string
+  description: string | null
+  topicId: string | null
+  materials: Material[]
+  /** APPLY-F — carried so the bare shell keeps them instead of discarding them. */
+  notes: string[]
+  overflow: ProviderAttachment[]
+  baseDescription: string | null
+}
+
+const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+
+export class TransferEngine {
+  private readonly backoff: BackoffPolicy
+  private readonly sleep: (ms: number) => Promise<void>
+
+  constructor(
+    private readonly prisma: PrismaClient,
+    private readonly provider: ClassroomProvider,
+    private readonly options: TransferEngineOptions = {},
+  ) {
+    this.backoff = options.backoff ?? DEFAULT_BACKOFF
+    this.sleep = options.sleep ?? defaultSleep
+  }
+
+  /* ================================================================ *
+   * Entry point
+   * ================================================================ */
+
+  async run(jobId: string): Promise<void> {
+    const holder: { lease: Lease | null } = { lease: null }
+    try {
+      await this.execute(jobId, holder)
+    } catch (error) {
+      if (error instanceof ExecutorLeaseLostError) {
+        // Not a failure. The reconciler claimed this job; it owns the terminal
+        // state and this executor must stop writing rather than overwrite it.
+        logger.warn('executor stood down — the reconciler holds this job', { jobId })
+        return
+      }
+      // D12 part 3 — the executor's top-level catch. Without it a rejected
+      // promise chain left the job `running` with a stale heartbeat while the
+      // process was still alive: boot reconciliation never fires because there
+      // is no boot, and the client polls a frozen counter forever.
+      logger.error('transfer-engine executor threw at top level', {
+        jobId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      await this.failJob(jobId, holder.lease, error)
+    }
+  }
+
+  private async failJob(jobId: string, lease: Lease | null, error: unknown): Promise<void> {
+    try {
+      // Claim FIRST. A job the reconciler already resolved must not be reopened
+      // and re-terminated by a losing executor.
+      const claimed = await this.prisma.transferJob.updateMany({
+        where: lease
+          ? { id: jobId, executorId: lease.executorId }
+          : { id: jobId, status: { in: ['queued', 'running'] } },
+        data: {
+          status: 'failed',
+          activeAccountId: null,
+          executorId: null,
+          finishedAt: new Date(),
+          rateLimitPause: null,
+          lastHeartbeatAt: new Date(),
+        },
+      })
+      if (claimed.count === 0) {
+        logger.warn('job already terminal; the failure write was refused', { jobId })
+        return
+      }
+      await this.resolveRemainingPending(jobId, 'provider_error', {
+        note: `Transfer stopped unexpectedly: ${error instanceof Error ? error.message : String(error)}`,
+      })
+      logger.jobEvent('failed', { jobId })
+    } catch (secondary) {
+      logger.error('transfer-engine could not mark the job failed', {
+        jobId,
+        error: secondary instanceof Error ? secondary.message : String(secondary),
+      })
+    }
+  }
+
+  /* ================================================================ *
+   * Execution
+   * ================================================================ */
+
+  private async execute(jobId: string, holder: { lease: Lease | null }): Promise<void> {
+    const job = await this.prisma.transferJob.findUnique({
+      where: { id: jobId },
+      include: { scan: true },
+    })
+    if (!job) throw new Error(`TransferJob ${jobId} not found`)
+
+    // P0-2 — take the lease. `updateMany` with the non-terminal predicate means
+    // a job the reconciler has already resolved cannot be re-entered, and two
+    // simultaneous executors cannot both believe they own it.
+    const executorId = `exec-${randomUUID()}`
+    const claimed = await this.prisma.transferJob.updateMany({
+      where: { id: jobId, status: { in: ['queued', 'running'] } },
+      data: {
+        status: 'running',
+        executorId,
+        startedAt: job.startedAt ?? new Date(),
+        lastHeartbeatAt: new Date(),
+      },
+    })
+    if (claimed.count === 0) throw new ExecutorLeaseLostError(jobId)
+
+    const lease: Lease = { jobId, executorId, accountId: job.accountId }
+    holder.lease = lease
+    logger.jobEvent('started', { jobId, accountId: job.accountId, executorId })
+
+    const sourceCourseId = job.scan.sourceCourseId
+    const targetCourseId = job.scan.targetCourseId
+
+    // Topic infrastructure first — the old->new topic ID map used by every post.
+    const topicMap = await this.buildTopicMap(lease, sourceCourseId, targetCourseId)
+    await this.heartbeat(lease, { topicsCreatedOrMapped: topicMap.size })
+
+    // One enumeration hydrates the payload details. It does NOT decide HOW MANY
+    // posts there are — the items came from the stored scan rows. A post that
+    // has vanished since the scan simply has no detail and resolves to a
+    // terminal `skipped`/`provider_error`, which is a real outcome, not a hole.
+    //
+    // P0-2 — it heartbeats per page. A 50-post enumeration under
+    // MOCK_PROVIDER_DELAY_MS used to exceed `jobStaleAfterMs` in total silence,
+    // which is precisely how a live executor got mistaken for a dead one.
+    const detail = new Map<string, EnumeratedPost>()
+    const enumerated = await enumeratePosts(this.provider, sourceCourseId, {
+      onPage: () => this.heartbeat(lease),
+    })
+    for (const post of enumerated.posts) {
+      detail.set(`${post.sourceType}:${post.sourceId}`, post)
+    }
+
+    const findings = this.parseFindings(job.scan.findingsJson)
+    const resolutions = this.parseResolutions(job.resolutionsJson)
+    const perPost = buildPostResolutions(resolutions, findings)
+
+    const items = (await this.prisma.transferJobItem.findMany({
+      where: { jobId },
+      orderBy: { createdOrder: 'asc' },
+      select: {
+        id: true,
+        scanItemId: true,
+        sourceType: true,
+        sourceId: true,
+        title: true,
+        createdOrder: true,
+      },
+    })) as ItemRow[]
+
+    for (const item of items) {
+      const post = detail.get(`${item.sourceType}:${item.sourceId}`)
+      const postResolution = perPost.get(item.scanItemId) ?? null
+      await this.processItem(lease, targetCourseId, item, post, postResolution, topicMap)
+      await this.heartbeat(lease)
+    }
+
+    // D12 part 2 — the sweep. This is the last line of defence that makes the
+    // invariant hold for real rather than only where every branch remembered.
+    const swept = await this.resolveRemainingPending(jobId, 'provider_error', {
+      note: 'Resolved by the completion sweep — no branch recorded an outcome for this item.',
+    })
+    if (swept > 0) {
+      logger.jobEvent('swept_pending', { jobId, swept })
+    }
+
+    const counts = await countOutcomes(this.prisma, jobId)
+    const finished = await this.prisma.transferJob.updateMany({
+      where: { id: jobId, executorId },
+      data: {
+        status: 'completed',
+        // Releasing the partial unique index is what lets the account start
+        // another transfer.
+        activeAccountId: null,
+        executorId: null,
+        finishedAt: new Date(),
+        rateLimitPause: null,
+        lastHeartbeatAt: new Date(),
+      },
+    })
+    if (finished.count === 0) throw new ExecutorLeaseLostError(jobId)
+    logger.jobEvent('completed', { jobId, ...counts })
+
+    const cleanTransfer =
+      counts.fallbackShell === 0 && counts.skippedTotal === 0 && counts.rubricNotesAdded === 0
+    await this.options.onJobComplete?.({ jobId, accountId: job.accountId, cleanTransfer })
+  }
+
+  /* ---------------------------------------------------------------- */
+
+  /**
+   * P0-2 — every executor write to the job row goes through here, and every one
+   * of them is a lease check. Zero affected rows means the reconciler took the
+   * job, and continuing would mean two writers on one ledger.
+   */
+  private async heartbeat(
+    lease: Lease,
+    data: { topicsCreatedOrMapped?: number; rateLimitPause?: string | null } = {},
+  ): Promise<void> {
+    const result = await this.prisma.transferJob.updateMany({
+      where: { id: lease.jobId, executorId: lease.executorId },
+      data: { ...data, lastHeartbeatAt: new Date() },
+    })
+    if (result.count === 0) throw new ExecutorLeaseLostError(lease.jobId)
+  }
+
+  private parseFindings(findingsJson: string): ResolvedFinding[] {
+    try {
+      const raw = JSON.parse(findingsJson) as {
+        id: string
+        scanItemId: string
+        attachmentId: string
+        attachmentName: string
+      }[]
+      return raw.map((f) => ({
+        findingId: f.id,
+        scanItemId: f.scanItemId,
+        attachmentId: f.attachmentId,
+        attachmentName: f.attachmentName,
+      }))
+    } catch {
+      return []
+    }
+  }
+
+  /** Read back from the job row — persisted at creation, so a restart applies
+   *  the same decisions rather than silently transferring without them. */
+  private parseResolutions(resolutionsJson: string): Resolution[] {
+    try {
+      return JSON.parse(resolutionsJson) as Resolution[]
+    } catch {
+      return []
+    }
+  }
+
+  private async buildTopicMap(
+    lease: Lease,
+    sourceCourseId: string,
+    targetCourseId: string,
+  ): Promise<Map<string, string>> {
+    const map = new Map<string, string>()
+    let pageToken: string | null = null
+    do {
+      const page = await this.provider.listTopics(sourceCourseId, { pageToken })
+      await this.heartbeat(lease)
+      for (const topic of page.items) {
+        const created = await this.provider.createTopic(targetCourseId, topic.name)
+        map.set(topic.id, created.topicId)
+        // P0-2 — a course with many topics used to create every one of them in
+        // total silence, which is long enough to look dead.
+        await this.heartbeat(lease)
+      }
+      pageToken = page.nextPageToken
+    } while (pageToken != null)
+    return map
+  }
+
+  /* ---------------------------------------------------------------- *
+   * Per-item execution — the total AND honest outcome function (D12/D32)
+   * ---------------------------------------------------------------- */
+
+  private async processItem(
+    lease: Lease,
+    targetCourseId: string,
+    item: ItemRow,
+    post: EnumeratedPost | undefined,
+    resolution: PostResolutions | null,
+    topicMap: Map<string, string>,
+  ): Promise<void> {
+    try {
+      if (resolution?.skipsPost) {
+        await this.finish(item.id, {
+          outcome: 'skipped',
+          skipReason: resolution.skipReason ?? 'user_skip_post',
+          note: `Skipped by you — you chose to skip this post after its attachment could not be linked.`,
+          resolutionKind: resolution.kinds[0] ?? null,
+        })
+        return
+      }
+
+      if (!post) {
+        // Present at scan time, absent now. A real terminal outcome, recorded
+        // honestly rather than left pending.
+        await this.finish(item.id, {
+          outcome: 'skipped',
+          skipReason: 'provider_error',
+          note: 'This post no longer exists in the source course — it was removed after the pre-flight scan.',
+          resolutionKind: null,
+        })
+        return
+      }
+
+      await this.transferPost(lease, targetCourseId, item, post, resolution, topicMap)
+    } catch (error) {
+      // A lost lease is not an item outcome — it means this executor must stop.
+      if (error instanceof ExecutorLeaseLostError) throw error
+
+      // THE catch that makes the outcome function total. PermissionError,
+      // NotFoundError, a Prisma SQLITE_BUSY, a null deref in the payload
+      // builder — all of them land here and all of them terminate the item.
+      logger.error('transfer-engine item failed with an unhandled error', {
+        jobId: lease.jobId,
+        itemId: item.id,
+        title: item.title,
+        error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+      })
+      await this.recordItemFailure(item, error)
+    }
+  }
+
+  /**
+   * P0-1 — the evidence-aware half of the total outcome function.
+   *
+   * The unconditional version of this clause is what re-opened prior-P0-5: it
+   * fired for a throw anywhere inside `transferPost`, INCLUDING after the
+   * provider create had already succeeded, and told the teacher nothing was
+   * written to a course that now contains the post. Three reachable post-create
+   * throws did exactly that. So: read the evidence first, and never claim
+   * "nothing was written" about a post this job knows it created.
+   */
+  private async recordItemFailure(item: ItemRow, error: unknown): Promise<void> {
+    const detail = error instanceof Error ? error.name : 'Error'
+    const current = await this.prisma.transferJobItem.findUnique({
+      where: { id: item.id },
+      select: {
+        outcome: true,
+        note: true,
+        targetPostId: true,
+        claimedTargetPostId: true,
+        attemptCount: true,
+      },
+    })
+
+    if (current && current.outcome !== 'pending') {
+      // Already terminal, and that outcome was recorded on evidence. Append the
+      // late failure; never re-bucket.
+      const suffix = postCreatedFollowUpFailedNote(detail)
+      await this.prisma.transferJobItem.update({
+        where: { id: item.id },
+        data: { note: current.note ? `${current.note} ${suffix}` : suffix },
+      })
+      logger.warn('a terminal item saw a late failure; note appended, outcome preserved', {
+        itemId: item.id,
+        outcome: current.outcome,
+        detail,
+      })
+      return
+    }
+
+    const created = current?.claimedTargetPostId ?? current?.targetPostId ?? null
+    if (created) {
+      await this.finish(item.id, {
+        outcome: 'transferred',
+        skipReason: null,
+        note: postCreatedFollowUpFailedNote(detail),
+        targetPostId: created,
+        resolutionKind: null,
+      })
+      return
+    }
+
+    await this.finish(item.id, {
+      outcome: 'skipped',
+      skipReason: 'provider_error',
+      note: `Could not be copied (${detail}). Nothing was written to the target course for this post.`,
+      resolutionKind: null,
+    })
+  }
+
+  private buildMaterials(
+    attachments: ProviderAttachment[],
+    drop: Set<string>,
+    copiedDriveFileIds: Map<string, string>,
+  ): {
+    materials: Material[]
+    overflow: ProviderAttachment[]
+    /** APPLY-A — driveFiles whose shareMode could not be read. */
+    unlinkable: ProviderAttachment[]
+  } {
+    // D22 — ordered by sortOrder, so WHICH 20 survive the cap is a total order.
+    const usable = [...attachments]
+      .filter((a) => !drop.has(a.id))
+      .sort((a, b) => a.sortOrder - b.sortOrder || (a.id < b.id ? -1 : 1))
+
+    const linked = usable.slice(0, ATTACHMENT_CAP)
+    const overflow = usable.slice(ATTACHMENT_CAP)
+
+    const materials: Material[] = []
+    const unlinkable: ProviderAttachment[] = []
+    for (const a of linked) {
+      switch (a.kind) {
+        case 'driveFile': {
+          // APPLY-A — the brief's binding rule is "preserve each attachment's
+          // shareMode … NEVER default to VIEW". `?? 'VIEW'` was that exact
+          // substitution, under a comment asserting it could not happen. A null
+          // shareMode is now a finding: the file is left unlinked and named in
+          // a note, because re-sharing someone's file on a guess is worse than
+          // telling the teacher we could not read the setting.
+          if (a.shareMode == null) {
+            unlinkable.push(a)
+            break
+          }
+          materials.push({
+            kind: 'driveFile',
+            // P0-3 — the id of the COPY when Copy-to-My-Drive ran, otherwise the
+            // source's own file id. The mock no longer rewrites the source row,
+            // so this substitution is the only way the copy reaches the payload.
+            driveFileId: copiedDriveFileIds.get(a.id) ?? a.driveFileId ?? a.id,
+            title: a.title,
+            shareMode: a.shareMode,
+          })
+          break
+        }
+        case 'youTubeVideo':
+          materials.push({
+            kind: 'youTubeVideo',
+            videoId: a.url?.split('v=').pop() ?? a.id,
+            title: a.title,
+          })
+          break
+        case 'form':
+          materials.push({ kind: 'form', formUrl: a.url ?? '', title: a.title })
+          break
+        default:
+          materials.push({ kind: 'link', url: a.url ?? '', title: a.title })
+      }
+    }
+    return { materials, overflow, unlinkable }
+  }
+
+  private composeDescription(
+    base: string | null,
+    parts: { overflow: ProviderAttachment[]; notes: string[] },
+  ): string | null {
+    const sections: string[] = []
+    if (base) sections.push(base)
+    if (parts.overflow.length > 0) {
+      sections.push(
+        [
+          OVERFLOW_LINKS_HEADER,
+          ...parts.overflow.map((a) => `- ${a.title}: ${a.url ?? a.driveFileId ?? ''}`),
+        ].join('\n'),
+      )
+    }
+    for (const note of parts.notes) sections.push(note)
+    return sections.length > 0 ? sections.join('\n\n') : null
+  }
+
+  private async transferPost(
+    lease: Lease,
+    targetCourseId: string,
+    item: ItemRow,
+    post: EnumeratedPost,
+    resolution: PostResolutions | null,
+    topicMap: Map<string, string>,
+  ): Promise<void> {
+    const drop = resolution?.dropAttachmentIds ?? new Set<string>()
+
+    // Scenario 3, "Copy to My Drive": become the owner BEFORE linking.
+    //
+    // P0-3 — the returned id is CONSUMED. The mock used to satisfy this contract
+    // by rewriting the SOURCE course's attachment row in place — a move, not a
+    // copy — and the engine depended on the mutation by re-reading the same
+    // source rows afterwards. A faithful adapter (`drive.files.copy` → a new
+    // file id, source untouched) would have returned into a caller that ignored
+    // it, and the created post would have linked the still-locked original.
+    const copiedDriveFileIds = new Map<string, string>()
+    for (const attachmentId of resolution?.copyToMyDriveIds ?? []) {
+      const { newDriveFileId } = await this.provider.copyAttachmentToMyDrive(
+        { id: attachmentId, parentType: post.sourceType, parentId: post.sourceId },
+        lease.accountId,
+      )
+      copiedDriveFileIds.set(attachmentId, newDriveFileId)
+    }
+
+    const { materials, overflow, unlinkable } = this.buildMaterials(
+      post.attachments,
+      drop,
+      copiedDriveFileIds,
+    )
+
+    const notes: string[] = []
+    for (const name of resolution?.notedAttachmentNames ?? []) {
+      notes.push(attachmentFallbackNote(name))
+    }
+    for (const attachment of unlinkable) {
+      notes.push(shareModeUnknownNote(attachment.title))
+    }
+    const overflowNote = overflow.length > 0 ? attachmentOverflowNote(overflow.length) : null
+    if (overflowNote) notes.push(overflowNote)
+
+    const description = this.composeDescription(post.description, { overflow, notes })
+    const topicId = post.topicId ? (topicMap.get(post.topicId) ?? null) : null
+
+    const declaredOutcome =
+      resolution?.forcedOutcome === 'fallback_shell' || unlinkable.length > 0
+        ? 'fallback_shell'
+        : 'transferred'
+
+    const created = await this.createWithBackoff(lease, item, post, {
+      targetCourseId,
+      description,
+      topicId,
+      materials,
+      notes,
+      overflow,
+      baseDescription: post.description,
+    })
+
+    if (created.kind === 'exhausted') {
+      // The item exhausted its 5 attempts and even the bare shell would not go
+      // through. Terminal and honest — not a hang.
+      await this.finish(item.id, {
+        outcome: 'skipped',
+        skipReason: 'rate_limit_exhausted',
+        note: rateLimitExhaustionNote(MAX_ATTEMPTS),
+        attemptCount: MAX_ATTEMPTS,
+        resolutionKind: resolution?.kinds[0] ?? null,
+      })
+      return
+    }
+
+    /* ---------------------------------------------------------------- *
+     * P0-1 — EVERYTHING BELOW THIS LINE IS POST-CREATE.
+     *
+     * The post exists in the target course. No failure down here may
+     * re-bucket the item or null its evidence; each one degrades to a note.
+     * ---------------------------------------------------------------- */
+
+    const followUpFailures: string[] = []
+
+    let rubricDegraded = false
+    try {
+      rubricDegraded = await this.copyRubricIfAny(post, created.id)
+    } catch (error) {
+      followUpFailures.push('rubric copy')
+      logger.warn('rubric step failed after the post was created; degrading to a note', {
+        targetPostId: created.id,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      rubricDegraded = true
+    }
+
+    if (rubricDegraded) {
+      const amended = this.composeDescription(post.description, {
+        overflow,
+        notes: [...notes, rubricDegradedNote()],
+      })
+      if (amended != null) {
+        try {
+          if (post.sourceType === 'courseWork') {
+            await this.provider.updateCourseWorkDescription(created.id, amended)
+          } else {
+            await this.provider.updateCourseWorkMaterialDescription(created.id, amended)
+          }
+        } catch (error) {
+          followUpFailures.push('description update')
+          logger.warn('description amendment failed after the post was created', {
+            targetPostId: created.id,
+            error: error instanceof Error ? error.message : String(error),
+          })
+        }
+      }
+    }
+
+    const baseNote =
+      created.kind === 'shell'
+        ? rateLimitExhaustionNote(MAX_ATTEMPTS)
+        : notes.length > 0
+          ? notes.join(' ')
+          : null
+    const note =
+      followUpFailures.length > 0
+        ? [baseNote, postCreatedFollowUpFailedNote(followUpFailures.join(' and '))]
+            .filter((part): part is string => part != null)
+            .join(' ')
+        : baseNote
+
+    await this.finish(item.id, {
+      outcome: created.kind === 'shell' ? 'fallback_shell' : declaredOutcome,
+      skipReason: null,
+      note,
+      targetPostId: created.id,
+      attemptCount: created.attempts,
+      rubricDegraded,
+      resolutionKind: resolution?.kinds[0] ?? null,
+    })
+  }
+
+  /* ---------------------------------------------------------------- *
+   * The create, with backoff and the DISTINCT bare-shell fallback (D13)
+   * ---------------------------------------------------------------- */
+
+  private async createWithBackoff(
+    lease: Lease,
+    item: ItemRow,
+    post: EnumeratedPost,
+    ctx: CreateContext,
+  ): Promise<{ kind: 'created' | 'shell'; id: string; attempts: number } | { kind: 'exhausted' }> {
+    let attempt = 0
+    let lastRateLimit: RateLimitError | null = null
+
+    while (attempt < MAX_ATTEMPTS) {
+      attempt += 1
+      // D14 — attemptedAt is written IMMEDIATELY BEFORE the provider call, so a
+      // crash here leaves evidence that an attempt was made and the item's fate
+      // is verifiable rather than assumed.
+      await this.prisma.transferJobItem.update({
+        where: { id: item.id },
+        data: { attemptedAt: new Date(), attemptCount: attempt },
+      })
+
+      try {
+        const id = await this.issueCreate(post, ctx)
+        // P0-1/P0-4 — EVIDENCE FIRST, before anything else can throw. This is
+        // what lets the item-level catch tell the truth and what lets the
+        // reconciler resolve an interruption from an id the job owns rather
+        // than from a title it hopes is unique.
+        await this.claimTargetPost(item.id, id)
+        await this.clearPause(lease)
+        return { kind: 'created', id, attempts: attempt }
+      } catch (error) {
+        if (!(error instanceof RateLimitError)) throw error
+        lastRateLimit = error
+        if (attempt >= MAX_ATTEMPTS) break
+        const waitMs = backoffDelayMs(attempt, error.retryAfterMs, this.backoff)
+        await this.recordPause(lease, item, attempt, waitMs)
+        logger.jobEvent('rate_limited_pause', {
+          itemId: item.id,
+          title: item.title,
+          attempt,
+          waitMs,
+        })
+        await this.sleep(waitMs)
+        logger.jobEvent('resumed', { itemId: item.id, attempt })
+      }
+    }
+
+    await this.clearPause(lease)
+
+    // Exhausted. The guaranteed draft shell is a DIFFERENT CALL with a
+    // DIFFERENT PAYLOAD — bare, no materials[]. Re-issuing the same
+    // attachment-bearing create that just refused five times is exactly why the
+    // "guaranteed" shell used to be unreachable.
+    //
+    // APPLY-F — it carries the accumulated notes AND the overflow link list.
+    // Discarding them made the shell say "re-attach any files" without naming
+    // one, and silently voided the 21+-as-description-URLs guarantee.
+    try {
+      const id = await this.issueCreate(post, {
+        ...ctx,
+        description: this.composeDescription(ctx.baseDescription, {
+          overflow: ctx.overflow,
+          notes: [...ctx.notes, rateLimitExhaustionNote(MAX_ATTEMPTS)],
+        }),
+        materials: [],
+      })
+      await this.claimTargetPost(item.id, id)
+      logger.warn('rate-limit exhausted; bare draft shell created', {
+        itemId: item.id,
+        title: item.title,
+        attempts: MAX_ATTEMPTS,
+        lastRetryAfterMs: lastRateLimit?.retryAfterMs ?? null,
+      })
+      return { kind: 'shell', id, attempts: MAX_ATTEMPTS }
+    } catch (shellError) {
+      // If even the shell will not go through, say so honestly.
+      logger.error('rate-limit exhausted and the bare shell also failed', {
+        itemId: item.id,
+        title: item.title,
+        error: shellError instanceof Error ? shellError.message : String(shellError),
+      })
+      return { kind: 'exhausted' }
+    }
+  }
+
+  /** P0-1/P0-4 — the job's own evidence that a post now exists. */
+  private async claimTargetPost(itemId: string, targetPostId: string): Promise<void> {
+    await this.prisma.transferJobItem.update({
+      where: { id: itemId },
+      data: { claimedTargetPostId: targetPostId },
+    })
+  }
+
+  private async issueCreate(post: EnumeratedPost, ctx: CreateContext): Promise<string> {
+    if (post.sourceType === 'courseWorkMaterial') {
+      const result = await this.provider.createCourseWorkMaterial(ctx.targetCourseId, {
+        title: post.title,
+        description: ctx.description,
+        state: 'DRAFT',
+        topicId: ctx.topicId,
+        materials: ctx.materials,
+      })
+      return result.id
+    }
+    const payload: CourseWorkPayload = {
+      title: post.title,
+      description: ctx.description,
+      workType: post.workType ?? 'ASSIGNMENT',
+      state: 'DRAFT',
+      topicId: ctx.topicId,
+      maxPoints: post.maxPoints,
+      answerConfig: post.answerConfig,
+      quizFormLink: post.quizFormLink,
+      materials: ctx.materials,
+      assigneeMode: 'ALL_STUDENTS',
+    }
+    const result = await this.provider.createCourseWork(ctx.targetCourseId, payload)
+    return result.id
+  }
+
+  /* ---------------------------------------------------------------- */
+
+  /**
+   * P0-1 — `getRubric` is INSIDE the try. It used to sit outside it, so a
+   * permission failure on the rubric READ propagated out of a post that had
+   * already been created and took the whole item down with it.
+   */
+  private async copyRubricIfAny(post: EnumeratedPost, targetPostId: string): Promise<boolean> {
+    if (post.sourceType !== 'courseWork' || !post.hasRubric) return false
+    try {
+      const rubric = await this.provider.getRubric(post.sourceId)
+      if (!rubric) return false
+      await this.provider.createRubric(targetPostId, rubric)
+      return false
+    } catch (error) {
+      if (error instanceof LicenseBlockedError) return true
+      // A non-licence rubric failure must not take the post down — the post
+      // itself transferred. Degrade the same way and log.
+      logger.warn('rubric copy failed for a non-licence reason; degrading to a note', {
+        targetPostId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      return true
+    }
+  }
+
+  private async recordPause(
+    lease: Lease,
+    item: ItemRow,
+    attempt: number,
+    waitMs: number,
+  ): Promise<void> {
+    await this.heartbeat(lease, {
+      rateLimitPause: JSON.stringify({ retryInMs: waitMs, attempt, itemTitle: item.title }),
+    })
+    await this.prisma.transferJobItem.update({
+      where: { id: item.id },
+      data: { nextAttemptAt: new Date(Date.now() + waitMs) },
+    })
+  }
+
+  private async clearPause(lease: Lease): Promise<void> {
+    await this.heartbeat(lease, { rateLimitPause: null })
+  }
+
+  /**
+   * The single place an item leaves `pending`.
+   *
+   * P0-1 — the `outcome: 'pending'` predicate makes overwriting a terminal
+   * outcome UNREPRESENTABLE rather than merely unintended. `finish()` used to
+   * be `update where {id}`, and the item-level catch used it to turn a
+   * successfully created post into a system skip with `targetPostId` nulled.
+   */
+  private async finish(
+    itemId: string,
+    data: {
+      outcome: 'transferred' | 'fallback_shell' | 'skipped'
+      skipReason: SkipReason | null
+      note: string | null
+      targetPostId?: string | null
+      attemptCount?: number
+      rubricDegraded?: boolean
+      resolutionKind?: string | null
+    },
+  ): Promise<void> {
+    const result = await this.prisma.transferJobItem.updateMany({
+      where: { id: itemId, outcome: 'pending' },
+      data: {
+        outcome: data.outcome,
+        skipReason: data.skipReason,
+        note: data.note,
+        // D14 — targetPostId is written in the SAME statement as the outcome,
+        // so there is no window in which the item claims 'transferred' without
+        // saying what it created.
+        targetPostId: data.targetPostId ?? null,
+        ...(data.attemptCount != null ? { attemptCount: data.attemptCount } : {}),
+        ...(data.rubricDegraded != null ? { rubricDegraded: data.rubricDegraded } : {}),
+        ...(data.resolutionKind != null ? { resolutionKind: data.resolutionKind } : {}),
+      },
+    })
+    if (result.count === 0) {
+      logger.error('refused to overwrite an already-terminal item outcome', {
+        itemId,
+        attemptedOutcome: data.outcome,
+        attemptedSkipReason: data.skipReason,
+      })
+    }
+  }
+
+  /** Used by both the pre-completion sweep and the top-level failure path. */
+  private async resolveRemainingPending(
+    jobId: string,
+    skipReason: SkipReason,
+    opts: { note: string },
+  ): Promise<number> {
+    const result = await this.prisma.transferJobItem.updateMany({
+      where: { jobId, outcome: 'pending' },
+      data: { outcome: 'skipped', skipReason, note: opts.note },
+    })
+    return result.count
+  }
+}

@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+
+# Secrets — never commit. Use the .env.example templates instead.
+.env
+.env.local
+.env.*.local
+server/.env
+client/.env
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Local database — regenerate with `npm run setup`
+*.db
+*.db-journal
+server/prisma/data/
+
+# Test / tooling output
+coverage/
+*.log
+logs.txt
+
+# OS
+.DS_Store
+Thumbs.db
