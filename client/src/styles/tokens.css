@@ -278,9 +278,10 @@ select.select-input:focus-visible{ outline:3px solid var(--focus); outline-offse
 .stat-tile{ border:1px solid var(--line-strong); border-radius:var(--radius); padding:12px 10px; background:var(--paper-1); text-align:center; }
 .stat-num{ font-family:var(--font-mono); font-size:22px; font-weight:600; color:var(--ink-900); font-variant-numeric:tabular-nums; }
 .stat-label{ font-size:10.5px; color:var(--ink-500); text-transform:uppercase; letter-spacing:.03em; margin-top:2px; }
-/* UI-Δ1, decided: 5 -> 3 -> 2 columns. */
-@media (max-width: 900px){ .stat-grid{ grid-template-columns:repeat(3,1fr); } }
-@media (max-width: 620px){ .stat-grid{ grid-template-columns:repeat(2,1fr); } }
+/* UI-Δ1, decided: 5-across -> 3+2 at the ~1024px tablet/Chromebook floor ->
+   2-column below ~768px. */
+@media (max-width: 1024px){ .stat-grid{ grid-template-columns:repeat(3,1fr); } }
+@media (max-width: 768px){ .stat-grid{ grid-template-columns:repeat(2,1fr); } }
 
 .system-skip-line{
   display:flex; gap:10px; align-items:flex-start; padding:10px 14px; margin-bottom:18px;
@@ -291,6 +292,9 @@ select.select-input:focus-visible{ outline:3px solid var(--focus); outline-offse
   font-family:var(--font-mono); font-size:12.5px; padding:10px 14px; background:var(--green-100);
   border:1px solid var(--green-700); border-radius:var(--radius); color:#0F4A28; margin-bottom:22px;
   font-variant-numeric:tabular-nums;
+  /* Never truncates: the reconciliation line wraps rather than clipping or
+     ellipsizing, at any viewport width. */
+  white-space:normal; overflow-wrap:break-word;
 }
 .log-filter{ display:flex; align-items:center; gap:8px; margin-bottom:10px; font-size:13px; }
 /* UI-Δ1, decided: the log table horizontal-scrolls inside this wrapper with a
@@ -304,10 +308,21 @@ table.log-table th{
 table.log-table td{ padding:9px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
 table.log-table tr:nth-child(even) td{ background:var(--paper-1); }
 table.log-table td.note-cell{ max-width:230px; white-space:normal; word-break:break-word; }
-table.log-table th:first-child, table.log-table td:first-child{
+/* UI-Δ1: sticky Title column. Opaque token background so rows slide beneath
+   it while scrolling, plus a hairline right border consistent with the
+   ledger/manifest aesthetic separating the pinned column from the scroll
+   region. Keyed off .log-title-col (always the Title column) rather than
+   :first-child, so the pin doesn't silently follow a future column reorder. */
+table.log-table th.log-title-col, table.log-table td.log-title-col{
   position:sticky; left:0; background:var(--paper-0); z-index:1;
+  border-right:1px solid var(--line-strong);
 }
-table.log-table tr:nth-child(even) td:first-child{ background:var(--paper-1); }
+table.log-table tr:nth-child(even) td.log-title-col{ background:var(--paper-1); }
+/* Row hover must survive the sticky column: both the scrolling cells and the
+   pinned Title cell pick up the same tint together, so the row still reads
+   as one unit under the pin. */
+table.log-table tbody tr:hover td{ background:var(--teal-100); }
+table.log-table tbody tr:hover td.log-title-col{ background:var(--teal-100); }
 .outcome-pill{ font-family:var(--font-mono); font-size:11px; padding:2px 7px; border-radius:2px; font-weight:600; }
 .outcome-transferred{ color:var(--green-700); background:var(--green-100); }
 .outcome-fallback{ color:var(--amber-700); background:var(--amber-100); }

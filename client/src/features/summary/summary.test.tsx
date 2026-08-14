@@ -290,6 +290,42 @@ describe('the itemized log', () => {
     expect(container.querySelector('.log-scroll')).not.toBeNull()
     expect(container.querySelector('table.log-table')).not.toBeNull()
   })
+
+  it('the scroll container is keyboard-reachable, not just mouse-scrollable', () => {
+    const { container } = renderSummary()
+    const scroller = container.querySelector('.log-scroll') as HTMLElement
+    expect(scroller).not.toBeNull()
+    expect(scroller.getAttribute('tabindex')).toBe('0')
+    expect(scroller.getAttribute('aria-label')).toBeTruthy()
+  })
+
+  it('marks the Title column, and only the Title column, as the sticky column', () => {
+    renderSummary()
+    const headers = screen.getAllByRole('columnheader')
+    expect(headers[0]).toHaveTextContent('Title')
+    expect(headers[0]).toHaveClass('log-title-col')
+    for (const other of headers.slice(1)) {
+      expect(other).not.toHaveClass('log-title-col')
+    }
+
+    const firstDataCell = within(rowFor('Week 1 Reading')).getAllByRole('cell')[0]
+    expect(firstDataCell).toHaveTextContent('Week 1 Reading')
+    expect(firstDataCell).toHaveClass('log-title-col')
+  })
+
+  it('keeps the six columns in the documented order, Title first (structural)', () => {
+    renderSummary()
+    const headers = screen.getAllByRole('columnheader').map((h) => h.textContent)
+    expect(headers[0]).toBe('Title')
+    expect(headers).toEqual([
+      'Title',
+      'Type',
+      'Topic',
+      'Outcome',
+      'Type-specific fields',
+      'Note',
+    ])
+  })
 })
 
 describe('summary actions', () => {
