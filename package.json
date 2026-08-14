@@ -29,7 +29,8 @@
     "test:budget:coldstart": "npm run -w client test:budget:coldstart",
     "check:citations": "node scripts/check-doc-citations.mjs",
     "test:budget:lease": "npm run -w server test:budget:lease",
-    "test:budget:courses": "npm run -w server test:budget:courses"
+    "test:budget:courses": "npm run -w server test:budget:courses",
+    "test:lease-mp": "npm run -w server test:lease-mp"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.0",

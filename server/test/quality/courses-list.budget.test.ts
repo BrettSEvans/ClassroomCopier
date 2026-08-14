@@ -48,7 +48,7 @@ afterEach(async () => {
 
 describe('[budget] selection_screen_call_cost', () => {
   it('enumerates NOTHING and counts once per course', async () => {
-    const agent = request.agent(app)
+    const agent = request.agent(app).set('X-Classroom-Copier', '1')
     await agent.post('/api/auth/sign-in').send({ accountId: 'acct-jamie' }).expect(200)
 
     const res = await agent.get('/api/courses?role=source').expect(200)
@@ -66,7 +66,7 @@ describe('[budget] selection_screen_call_cost', () => {
   })
 
   it('reports the SAME number the scan would', async () => {
-    const agent = request.agent(app)
+    const agent = request.agent(app).set('X-Classroom-Copier', '1')
     await agent.post('/api/auth/sign-in').send({ accountId: 'acct-jamie' }).expect(200)
     const res = await agent.get('/api/courses?role=source').expect(200)
 

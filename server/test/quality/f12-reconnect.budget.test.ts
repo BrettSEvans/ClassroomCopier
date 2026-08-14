@@ -30,7 +30,7 @@ describe('[budget] fixture_f12_reconnect_fidelity', () => {
       engineOptions: FAST_ENGINE,
     })
 
-    const first = request.agent(app)
+    const first = request.agent(app).set('X-Classroom-Copier', '1')
     await first.post('/api/auth/sign-in').send({ accountId: 'acct-jamie' }).expect(200)
     const scan = await first
       .post(`/api/courses/${FIXTURE_KEYS.F4}/preflight`)
@@ -42,7 +42,7 @@ describe('[budget] fixture_f12_reconnect_fidelity', () => {
       .expect(202)
 
     // Stop polling entirely (the tab is gone), then reconnect from scratch.
-    const reconnected = request.agent(app)
+    const reconnected = request.agent(app).set('X-Classroom-Copier', '1')
     await reconnected.post('/api/auth/sign-in').send({ accountId: 'acct-jamie' }).expect(200)
 
     let discovered: string | null = null

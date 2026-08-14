@@ -18,6 +18,7 @@ import {
 } from './adapters/types.js'
 import { config } from './config.js'
 import { logger } from './logger.js'
+import { requireCsrfHeader } from './middleware/csrf.js'
 import { authRouter } from './routes/auth.js'
 import { coursesRouter } from './routes/courses.js'
 import { healthRouter } from './routes/health.js'
@@ -79,6 +80,11 @@ export function buildApp(deps: AppDeps): BuiltApp {
   )
   app.use(express.json({ limit: '1mb' }))
   app.use(cookieParser())
+  // CSRF hardening — every state-changing method needs the custom header
+  // (see middleware/csrf.ts). Mounted ahead of ALL routers, health included,
+  // so no future route can be added state-changing without it; health has no
+  // state-changing methods so this is a no-op for it in practice.
+  app.use(requireCsrfHeader())
 
   // Mount order matters: health and auth are never behind the monetization
   // gate, and the status endpoint must never be gated by a credit check.

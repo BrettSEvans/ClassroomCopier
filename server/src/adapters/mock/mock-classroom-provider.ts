@@ -120,7 +120,6 @@ export function attachmentRefKey(ref: Pick<AttachmentRef, 'id'>): string {
 }
 
 export class MockClassroomProvider implements ClassroomProvider {
-  private readonly attemptCounts = new Map<string, number>()
   /**
    * APPLY-G — the courses this instance has read from. A rate-limit rule only
    * applies to a run that actually enumerated the fixture course the rule
@@ -423,7 +422,7 @@ export class MockClassroomProvider implements ClassroomProvider {
    * carry materials[], which is what makes the bare draft-shell fallback a
    * genuinely different call with a genuinely different outcome (D13).
    */
-  private enforceRateLimit(title: string, materialCount: number): void {
+  private async enforceRateLimit(title: string, materialCount: number): Promise<void> {
     const rule = RATE_LIMIT_RULES.find((r) => r.title === title)
     if (!rule) return
     // APPLY-G — the rule belongs to a source course, not to a string. A run
@@ -437,12 +436,32 @@ export class MockClassroomProvider implements ClassroomProvider {
       return
     }
 
+    // Cycle-2 DEFER 1 — the attempt count is persisted in SQLite rather than
+    // held in an instance-local Map, so a provider rebuilt mid-run (a fresh
+    // `new MockClassroomProvider(...)` over the SAME database) continues the
+    // count instead of restarting it at zero and re-issuing 429s the caller
+    // already exhausted.
     const key = `${rule.title}:${rule.mode}`
-    const seen = this.attemptCounts.get(key) ?? 0
+    const seen = await this.readAttemptCount(key)
     if (seen < (rule.failures ?? 1)) {
-      this.attemptCounts.set(key, seen + 1)
+      await this.incrementAttemptCount(key)
       throw new RateLimitError('Quota exceeded, retry shortly', 25)
     }
+  }
+
+  private async readAttemptCount(key: string): Promise<number> {
+    const row = await this.prisma.mockRateLimitAttempt.findUnique({ where: { key } })
+    return row?.attemptCount ?? 0
+  }
+
+  /** Upsert-and-increment in one round trip so two concurrent callers racing
+   *  the SAME key still land on distinct counts rather than both reading 0. */
+  private async incrementAttemptCount(key: string): Promise<void> {
+    await this.prisma.mockRateLimitAttempt.upsert({
+      where: { key },
+      create: { key, attemptCount: 1 },
+      update: { attemptCount: { increment: 1 } },
+    })
   }
 
   private async requireCourse(courseId: string) {
@@ -491,7 +510,7 @@ export class MockClassroomProvider implements ClassroomProvider {
   async createCourseWork(courseId: string, payload: CourseWorkPayload): Promise<{ id: string }> {
     await this.delay()
     await this.requireCourse(courseId)
-    this.enforceRateLimit(payload.title, payload.materials.length)
+    await this.enforceRateLimit(payload.title, payload.materials.length)
 
     const count = await this.prisma.mockCourseWork.count({ where: { courseId } })
     const id = `cw-${courseId}-${count}-${Date.now().toString(36)}`
@@ -526,7 +545,7 @@ export class MockClassroomProvider implements ClassroomProvider {
   ): Promise<{ id: string }> {
     await this.delay()
     await this.requireCourse(courseId)
-    this.enforceRateLimit(payload.title, payload.materials.length)
+    await this.enforceRateLimit(payload.title, payload.materials.length)
 
     const count = await this.prisma.mockCourseWorkMaterial.count({ where: { courseId } })
     const id = `cwm-${courseId}-${count}-${Date.now().toString(36)}`

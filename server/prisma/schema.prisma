@@ -172,6 +172,22 @@ model MockAttachment {
   @@map("mock_attachment")
 }
 
+/// Cycle-2 DEFER 1 — persists `MockClassroomProvider`'s rate-limit attempt
+/// counter so F6's transient-429 rule (fail N times, then succeed) survives
+/// the provider being reconstructed mid-run. The provider used to hold this
+/// count in a plain in-memory Map: correct for one provider instance, but a
+/// rebuilt provider (a fresh `new MockClassroomProvider(...)`, e.g. after a
+/// process restart or in a test that constructs a second instance over the
+/// same database) silently reset the counter to zero and re-issued 429s the
+/// caller had already exhausted. Keyed on the SAME `${title}:${mode}` string
+/// the in-memory Map used, so this is a storage swap, not a behaviour change.
+model MockRateLimitAttempt {
+  key          String @id
+  attemptCount Int    @default(0)
+
+  @@map("mock_rate_limit_attempt")
+}
+
 /// D23 — a rubric is criteria and levels, not a boolean. `copyRubric` was
 /// replaced by getRubric + createRubric to match the real API's get-then-create
 /// shape, and this is the body those calls carry.

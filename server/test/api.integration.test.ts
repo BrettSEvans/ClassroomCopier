@@ -25,7 +25,10 @@ afterEach(async () => {
 })
 
 async function signedIn(accountId = 'acct-jamie') {
-  const agent = request.agent(app)
+  // The CSRF header is set as an AGENT DEFAULT (superagent applies `.set()`
+  // calls on an agent to every subsequent request from it), so every POST
+  // made through this agent — including this very sign-in — carries it.
+  const agent = request.agent(app).set('X-Classroom-Copier', '1')
   await agent.post('/api/auth/sign-in').send({ accountId }).expect(200)
   return agent
 }
@@ -229,7 +232,7 @@ describe('transfer jobs', () => {
       .expect(202)
 
     // "Reload the tab": a brand-new client context with only the cookie.
-    const reconnected = request.agent(app)
+    const reconnected = request.agent(app).set('X-Classroom-Copier', '1')
     await reconnected.post('/api/auth/sign-in').send({ accountId: 'acct-jamie' }).expect(200)
 
     let discovered: string | null = null
