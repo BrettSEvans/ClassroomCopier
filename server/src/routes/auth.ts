@@ -1,94 +1,123 @@
 import { Router } from 'express'
-import type { PrismaClient } from '@prisma/client'
-import { SignInRequestSchema } from '@classroom-copier/shared'
-import { requireAuth } from '../middleware/auth.js'
-import {
-  SESSION_COOKIE,
-  clearCookieOptions,
-  cookieOptions,
-  createSession,
-  resolveSession,
-  revokeSession,
-} from '../services/session.js'
+import { google } from 'googleapis'
+import { config } from '../config.js'
+import { sessionStore } from '../services/session.js'
 
-/**
- * auth-module. The forced picker is a property of the SIGN-IN ROUTE — it always
- * mints a fresh session — rather than a conditional on an existing one. Written
- * as "hide the picker if a session exists" it is a conditional someone can
- * later optimise away; written this way, "never skipped, never remembered" is
- * structural.
- */
-export function authRouter(prisma: PrismaClient): Router {
+export function createAuthRouter() {
   const router = Router()
 
-  router.get('/auth/mock-accounts', async (_req, res) => {
-    const accounts = await prisma.mockAccount.findMany({ orderBy: { displayName: 'asc' } })
-    res.json({
-      accounts: accounts.map((a) => ({
-        id: a.id,
-        displayName: a.displayName,
-        email: a.email,
-        initials: a.initials,
-      })),
+  const getOAuth2Client = () => {
+    return new google.auth.OAuth2(
+      config.googleClientId,
+      config.googleClientSecret,
+      config.googleRedirectUri
+    )
+  }
+
+  // GET /api/auth/sign-in - Redirects user to Google OAuth login screen
+  router.get('/sign-in', (req, res) => {
+    if (config.googleProviderMode === 'mock') {
+      // Return a message if server is still in mock mode
+      return res.status(400).json({
+        error: 'Server is currently running in mock mode. Set GOOGLE_PROVIDER_MODE=google in environment variables.',
+      })
+    }
+
+    const oauth2Client = getOAuth2Client()
+    const scopes = [
+      'https://www.googleapis.com/auth/classroom.courses.readonly',
+      'https://www.googleapis.com/auth/classroom.coursework.students',
+      'https://www.googleapis.com/auth/classroom.topics',
+      'https://www.googleapis.com/auth/drive.readonly',
+      'https://www.googleapis.com/auth/userinfo.profile',
+      'https://www.googleapis.com/auth/userinfo.email',
+    ]
+
+    const url = oauth2Client.generateAuthUrl({
+      access_type: 'offline',
+      prompt: 'select_account', // Prevents multi-account collisions as specified in PRD
+      scope: scopes,
     })
+
+    return res.redirect(url)
   })
 
-  router.post('/auth/sign-in', async (req, res) => {
-    const parsed = SignInRequestSchema.safeParse(req.body)
-    if (!parsed.success) {
-      res.status(400).json({ error: { code: 'bad_request', message: 'accountId is required.' } })
-      return
-    }
-    const account = await prisma.mockAccount.findUnique({ where: { id: parsed.data.accountId } })
-    if (!account) {
-      res.status(404).json({ error: { code: 'not_found', message: 'No such account.' } })
-      return
+  // GET /api/auth/callback - Handles Google OAuth redirect response
+  router.get('/callback', async (req, res) => {
+    const code = req.query.code as string
+    if (!code) {
+      return res.status(400).send('Authorization code missing from Google callback.')
     }
 
-    // Revoke whatever was there. Always minting a fresh session is what makes
-    // the picker unskippable and what makes "switch account" safe.
-    const existing = await resolveSession(
-      prisma,
-      (req.cookies as Record<string, string> | undefined)?.[SESSION_COOKIE],
-    )
-    if (existing) await revokeSession(prisma, existing.sessionId)
+    try {
+      const oauth2Client = getOAuth2Client()
+      const { tokens } = await oauth2Client.getToken(code)
+      oauth2Client.setCredentials(tokens)
 
-    const { token, expiresAt } = await createSession(prisma, account.id)
-    res.cookie(SESSION_COOKIE, token, cookieOptions(expiresAt))
-    res.json({
-      account: {
-        id: account.id,
-        displayName: account.displayName,
-        email: account.email,
-        initials: account.initials,
+      // Get user profile info
+      const oauth2 = google.oauth2({ version: 'v2', auth: oauth2Client })
+      const userInfo = await oauth2.userinfo.get()
+
+      const email = userInfo.data.email ?? 'unknown@school.edu'
+      const name = userInfo.data.name ?? 'Teacher'
+      const avatarUrl = userInfo.data.picture ?? undefined
+
+      // Store credentials in active session
+      const session = sessionStore.createSession({
+        userId: userInfo.data.id ?? email,
+        email,
+        name,
+        avatarUrl,
+        accessToken: tokens.access_token ?? '',
+        refreshToken: tokens.refresh_token ?? undefined,
+      })
+
+      res.cookie('session_id', session.id, {
+        httpOnly: true,
+        secure: config.isProductionLike,
+        sameSite: 'lax',
+      })
+
+      // Redirect back to frontend application dashboard
+      const frontendUrl = process.env.FRONTEND_URL ?? config.corsOrigins[0] ?? 'http://localhost:5173'
+      return res.redirect(frontendUrl)
+    } catch (err) {
+      console.error('[auth/callback] Token exchange failed:', err)
+      return res.status(500).send('Failed to authenticate with Google.')
+    }
+  })
+
+  // GET /api/auth/me - Check current user session
+  router.get('/me', (req, res) => {
+    const sessionId = req.cookies?.session_id
+    if (!sessionId) {
+      return res.json({ authenticated: false })
+    }
+
+    const session = sessionStore.getSession(sessionId)
+    if (!session) {
+      return res.json({ authenticated: false })
+    }
+
+    return res.json({
+      authenticated: true,
+      user: {
+        id: session.userId,
+        name: session.name,
+        email: session.email,
+        avatarUrl: session.avatarUrl,
       },
     })
   })
 
-  router.post('/auth/sign-out', async (req, res) => {
-    const session = await resolveSession(
-      prisma,
-      (req.cookies as Record<string, string> | undefined)?.[SESSION_COOKIE],
-    )
-    if (session) await revokeSession(prisma, session.sessionId)
-    res.clearCookie(SESSION_COOKIE, clearCookieOptions())
-    res.status(204).end()
-  })
-
-  router.get('/auth/me', requireAuth(prisma), async (req, res) => {
-    const account = await prisma.mockAccount.findUnique({ where: { id: req.auth!.accountId } })
-    if (!account) {
-      res.status(401).json({ error: { code: 'unauthenticated', message: 'Sign in to continue.' } })
-      return
+  // POST /api/auth/sign-out - Clear user session
+  router.post('/sign-out', (req, res) => {
+    const sessionId = req.cookies?.session_id
+    if (sessionId) {
+      sessionStore.destroySession(sessionId)
     }
-    res.json({
-      account: {
-        id: account.id,
-        displayName: account.displayName,
-        email: account.email,
-        initials: account.initials,
-      },
-    })
+    res.clearCookie('session_id')
+    return res.json({ success: true })
   })
 
   return router
