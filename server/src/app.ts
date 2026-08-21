@@ -19,7 +19,6 @@ export function createApp(deps: AppDependencies = {}) {
   const app = express()
   const prisma = deps.prisma ?? new PrismaClient()
 
-  // Middleware setup
   app.use(
     cors({
       origin: config.corsOrigins,
@@ -29,7 +28,6 @@ export function createApp(deps: AppDependencies = {}) {
   app.use(express.json())
   app.use(cookieParser())
 
-  // Instantiate Provider based on googleProviderMode configuration
   const provider: ClassroomProvider =
     deps.provider ??
     (config.googleProviderMode === 'google'
@@ -38,7 +36,6 @@ export function createApp(deps: AppDependencies = {}) {
           perItemDelayMs: config.mockProviderDelayMs,
         }))
 
-  // Health check route
   app.get('/health', (_req, res) => {
     res.json({
       status: 'ok',
@@ -47,10 +44,19 @@ export function createApp(deps: AppDependencies = {}) {
     })
   })
 
-  // Register API routers
-  app.use('/api/auth', createAuthRouter())
-  app.use('/api/courses', createCoursesRouter(provider))
-  app.use('/api/transfer', createTransferRouter(provider))
+  // Mount routes under both /api and root level to eliminate URL mismatch errors
+  const authRouter = createAuthRouter()
+  const coursesRouter = createCoursesRouter(provider)
+  const transferRouter = createTransferRouter(provider)
+
+  app.use('/api/auth', authRouter)
+  app.use('/auth', authRouter)
+
+  app.use('/api/courses', coursesRouter)
+  app.use('/courses', coursesRouter)
+
+  app.use('/api/transfer', transferRouter)
+  app.use('/transfer', transferRouter)
 
   return { app, prisma, provider }
 }
