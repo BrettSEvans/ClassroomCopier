@@ -1,36 +1,45 @@
-/**
- * Landing -> forced picker -> signed in.
- *
- * `startAt="picker"` is how the header's "Switch account" re-enters: straight
- * to the picker, which is still rendered unconditionally.
- */
-import { useState } from 'react'
-import type { AccountSummary } from '@classroom-copier/shared'
-import { AccountPicker } from './AccountPicker'
+import React, { useEffect, useState } from 'react'
 import { SignInLanding } from './SignInLanding'
-import { signIn } from '../../lib/api-client'
 
-interface AuthFlowProps {
-  onSignedIn: (account: AccountSummary) => void
-  startAt?: 'landing' | 'picker'
-  onError?: (error: unknown) => void
-}
+export const AuthFlow: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const [loading, setLoading] = useState(true)
+  const [authenticated, setAuthenticated] = useState(false)
 
-export function AuthFlow({ onSignedIn, startAt = 'landing', onError }: AuthFlowProps) {
-  const [stage, setStage] = useState<'landing' | 'picker'>(startAt)
-  const [busy, setBusy] = useState(false)
+  const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || ''
 
-  if (stage === 'landing') {
-    return <SignInLanding onSignIn={() => setStage('picker')} />
+  useEffect(() => {
+    // Check if the user is currently authenticated
+    fetch(`${apiBaseUrl}/api/auth/me`, { credentials: 'include' })
+      .then((res) => {
+        if (res.ok) return res.json()
+        return { authenticated: false }
+      })
+      .then((data) => {
+        if (data && data.authenticated) {
+          setAuthenticated(true)
+        } else {
+          setAuthenticated(false)
+        }
+      })
+      .catch(() => {
+        setAuthenticated(false)
+      })
+      .finally(() => {
+        setLoading(false)
+      })
+  }, [apiBaseUrl])
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center">
+        <div className="text-slate-500 font-medium">Loading Classroom Copier...</div>
+      </div>
+    )
   }
 
-  const choose = (account: AccountSummary) => {
-    setBusy(true)
-    signIn(account.id)
-      .then((session) => onSignedIn(session.account))
-      .catch((error: unknown) => onError?.(error))
-      .finally(() => setBusy(false))
+  if (!authenticated) {
+    return <SignInLanding />
   }
 
-  return <AccountPicker onChoose={choose} onCancel={() => setStage('landing')} busy={busy} />
+  return <>{children}</>
 }
