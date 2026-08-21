@@ -1,46 +1,43 @@
 {
-  "name": "classroom-copier",
+  "name": "@classroom-copier/server",
   "private": true,
   "version": "1.0.0",
-  "description": "Classroom Copier — batch-copy classwork into an existing Google Classroom course (mock-backed v1)",
-  "workspaces": [
-    "shared",
-    "server",
-    "client"
-  ],
-  "engines": {
-    "node": ">=20"
-  },
+  "type": "module",
   "scripts": {
-    "setup": "npm install && npm run -w server db:push && npm run -w server seed",
-    "dev:server": "npm run -w server dev",
-    "dev:client": "npm run -w client dev",
-    "build": "npm run -w shared build && npm run -w server build && npm run -w client build",
-    "test": "npm run -w shared test --if-present && npm run -w server test && npm run -w client test",
-    "lint": "eslint .",
-    "test:perf": "npm run -w server test:perf",
-    "test:budget:reconciliation": "npm run -w server test:budget:reconciliation",
-    "test:budget:totality": "npm run -w server test:budget:totality",
-    "test:budget:f1": "npm run -w server test:budget:f1",
-    "test:budget:f13": "npm run -w server test:budget:f13",
-    "test:budget:f12": "npm run -w server test:budget:f12",
-    "test:budget:reconcile": "npm run -w server test:budget:reconcile",
-    "test:budget:a11y": "npm run -w client test:budget:a11y",
-    "test:budget:coldstart": "npm run -w client test:budget:coldstart",
-    "check:citations": "node scripts/check-doc-citations.mjs",
-    "test:e2e": "playwright test --config=e2e/playwright.config.ts",
-    "test:budget:lease": "npm run -w server test:budget:lease",
-    "test:budget:courses": "npm run -w server test:budget:courses",
-    "test:lease-mp": "npm run -w server test:lease-mp"
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "db:push": "prisma db push",
+    "seed": "tsx src/db/seed.ts",
+    "test": "vitest run",
+    "test:perf": "vitest run src/__tests__/perf.test.ts",
+    "test:budget:reconciliation": "vitest run src/__tests__/reconciliation-budget.test.ts",
+    "test:budget:totality": "vitest run src/__tests__/totality-budget.test.ts",
+    "test:budget:f1": "vitest run src/__tests__/f1-budget.test.ts",
+    "test:budget:f13": "vitest run src/__tests__/f13-budget.test.ts",
+    "test:budget:f12": "vitest run src/__tests__/f12-budget.test.ts",
+    "test:budget:reconcile": "vitest run src/__tests__/reconcile-budget.test.ts",
+    "test:budget:lease": "vitest run src/__tests__/lease-budget.test.ts",
+    "test:budget:courses": "vitest run src/__tests__/courses-budget.test.ts",
+    "test:lease-mp": "vitest run src/__tests__/lease-mp.test.ts"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.22.0",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.1",
+    "googleapis": "^144.0.0",
+    "zod": "^3.23.8"
   },
   "devDependencies": {
-    "@axe-core/playwright": "^4.13.0",
-    "@eslint/js": "^9.39.0",
-    "@playwright/test": "^1.62.1",
-    "eslint": "^9.39.0",
-    "globals": "^15.15.0",
+    "@types/cookie-parser": "^1.4.8",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.9.0",
+    "prisma": "^5.22.0",
+    "tsx": "^4.19.2",
     "typescript": "^5.9.3",
-    "typescript-eslint": "^8.47.0"
-  },
-  "type": "module"
+    "vitest": "^2.1.5"
+  }
 }
