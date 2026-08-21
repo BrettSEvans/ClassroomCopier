@@ -1,43 +1,13 @@
 {
-  "name": "@classroom-copier/server",
+  "name": "classroom-copier-root",
   "private": true,
   "version": "1.0.0",
-  "type": "module",
+  "workspaces": [
+    "shared",
+    "client",
+    "server"
+  ],
   "scripts": {
-    "dev": "tsx watch src/index.ts",
-    "build": "tsc",
-    "start": "node dist/index.js",
-    "db:push": "prisma db push",
-    "seed": "tsx src/db/seed.ts",
-    "test": "vitest run",
-    "test:perf": "vitest run src/__tests__/perf.test.ts",
-    "test:budget:reconciliation": "vitest run src/__tests__/reconciliation-budget.test.ts",
-    "test:budget:totality": "vitest run src/__tests__/totality-budget.test.ts",
-    "test:budget:f1": "vitest run src/__tests__/f1-budget.test.ts",
-    "test:budget:f13": "vitest run src/__tests__/f13-budget.test.ts",
-    "test:budget:f12": "vitest run src/__tests__/f12-budget.test.ts",
-    "test:budget:reconcile": "vitest run src/__tests__/reconcile-budget.test.ts",
-    "test:budget:lease": "vitest run src/__tests__/lease-budget.test.ts",
-    "test:budget:courses": "vitest run src/__tests__/courses-budget.test.ts",
-    "test:lease-mp": "vitest run src/__tests__/lease-mp.test.ts"
-  },
-  "dependencies": {
-    "@prisma/client": "^5.22.0",
-    "cookie-parser": "^1.4.7",
-    "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
-    "express": "^4.21.1",
-    "googleapis": "^144.0.0",
-    "zod": "^3.23.8"
-  },
-  "devDependencies": {
-    "@types/cookie-parser": "^1.4.8",
-    "@types/cors": "^2.8.17",
-    "@types/express": "^5.0.0",
-    "@types/node": "^22.9.0",
-    "prisma": "^5.22.0",
-    "tsx": "^4.19.2",
-    "typescript": "^5.9.3",
-    "vitest": "^2.1.5"
+    "build": "npm run build --workspace=shared && npm run build --workspace=client"
   }
 }
